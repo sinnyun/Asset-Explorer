@@ -4,7 +4,7 @@ import { cn } from '../lib/utils';
 export interface ContextMenuItem {
   label: string;
   icon?: React.ReactNode;
-  onClick: () => void;
+  onClick?: () => void;
   danger?: boolean;
   divider?: boolean;
 }
@@ -87,7 +87,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                item.onClick();
+                item.onClick?.();
                 onClose();
               }}
               className={cn(
