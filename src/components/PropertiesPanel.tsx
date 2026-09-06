@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   HardDrive, Calendar, Image as ImageIcon, Folder, ExternalLink, 
   Copy, Hash, Layers, Filter,
-  File, Route, Ruler, Clock, Shield
+  File, Route, Ruler, Clock, Shield, Plus, X, Check
 } from 'lucide-react';
 import { AssetState, Folder as FolderType, Asset, SmartFolder, Tag, Collection } from '../types';
 import { formatBytes, formatDate, cn } from '../lib/utils';
@@ -35,6 +35,11 @@ interface PropertiesPanelProps {
   onDeleteFolder: (id: string) => void;
   onMoveFolder: (id: string, direction: 'up' | 'down') => void;
   onTogglePinFolder: (id: string) => void;
+
+  /** 全量更新单个资产的标签关联 */
+  onUpdateAssetTags: (assetId: string, tagIds: string[]) => void;
+  /** 全量更新单个资产的集合关联 */
+  onUpdateAssetCollections: (assetId: string, collectionIds: string[]) => void;
 }
 
 /**
@@ -98,7 +103,12 @@ export function PropertiesPanel({
   onDeleteFolder,
   onMoveFolder,
   onTogglePinFolder,
+  onUpdateAssetTags,
+  onUpdateAssetCollections,
 }: PropertiesPanelProps) {
+  // 底部「标签与集合」编辑弹层的展开状态：'tag' | 'collection' | null
+  const [editingAssoc, setEditingAssoc] = useState<'tag' | 'collection' | null>(null);
+
   // Combine all smart folders (built-in + custom)
   const allSmartFolders = [...smartFolders, ...state.customSmartFolders];
 
@@ -140,6 +150,25 @@ export function PropertiesPanel({
           ? `${asset.fileHash.slice(0, 16)}...${asset.fileHash.slice(-4)}`
           : asset.fileHash
         : null;
+
+      // ---- 底部标签/集合编辑的辅助操作 ----
+      const unassignedTags = state.tags.filter(t => !asset.tags.includes(t.id));
+      const unassignedCollections = state.collections.filter(c => !asset.collections.includes(c.id));
+
+      const addTag = (tagId: string) => {
+        if (asset.tags.includes(tagId)) return;
+        onUpdateAssetTags(asset.id, [...asset.tags, tagId]);
+      };
+      const removeTag = (tagId: string) => {
+        onUpdateAssetTags(asset.id, asset.tags.filter(tid => tid !== tagId));
+      };
+      const addCollection = (colId: string) => {
+        if (asset.collections.includes(colId)) return;
+        onUpdateAssetCollections(asset.id, [...asset.collections, colId]);
+      };
+      const removeCollection = (colId: string) => {
+        onUpdateAssetCollections(asset.id, asset.collections.filter(cid => cid !== colId));
+      };
 
       return (
         <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col h-full overflow-y-auto custom-scrollbar select-none">
@@ -271,35 +300,120 @@ export function PropertiesPanel({
               </div>
             </div>
 
-            {/* Assigned Tags & Collections */}
+            {/* Assigned Tags & Collections — 支持添加 / 删除 */}
             <div>
-              <label className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block mb-2">已打标签与集合</label>
-              <div className="space-y-2">
-                <div className="flex flex-wrap gap-1.5">
-                  {asset.tags.map(tagId => {
-                    const tag = state.tags.find(t => t.id === tagId);
-                    if (!tag) return null;
-                    return (
-                      <span key={tag.id} className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-[#252525] border border-neutral-700 text-neutral-300">
-                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: tag.color }} />
-                        {tag.name}
-                      </span>
-                    );
-                  })}
-                  {asset.tags.length === 0 && <span className="text-xs text-neutral-600 italic">暂无分配标签</span>}
+              <label className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block mb-2">标签与集合</label>
+              <div className="space-y-4">
+                {/* ---- 标签 ---- */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-medium text-neutral-400 flex items-center gap-1">
+                      <Hash size={11} /> 标签
+                    </span>
+                    {unassignedTags.length > 0 && (
+                      <button
+                        onClick={() => setEditingAssoc(editingAssoc === 'tag' ? null : 'tag')}
+                        className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 transition-colors"
+                        title="添加关联标签"
+                      >
+                        <Plus size={11} /> 添加标签
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5">
+                    {asset.tags.map(tagId => {
+                      const tag = state.tags.find(t => t.id === tagId);
+                      if (!tag) return null;
+                      return (
+                        <span key={tag.id} className="group inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-[#252525] border border-neutral-700 text-neutral-300">
+                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: tag.color }} />
+                          {tag.name}
+                          <button
+                            onClick={() => removeTag(tag.id)}
+                            className="text-neutral-500 hover:text-red-400 transition-colors ml-0.5"
+                            title="移除该标签"
+                          >
+                            <X size={11} />
+                          </button>
+                        </span>
+                      );
+                    })}
+                    {asset.tags.length === 0 && <span className="text-xs text-neutral-600 italic">暂无标签</span>}
+                  </div>
+
+                  {/* 添加标签选择器 */}
+                  {editingAssoc === 'tag' && unassignedTags.length > 0 && (
+                    <div className="mt-2 bg-[#161616] border border-neutral-700 rounded-md p-2 space-y-1">
+                      {unassignedTags.map(tag => (
+                        <button
+                          key={tag.id}
+                          onClick={() => addTag(tag.id)}
+                          className="w-full flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-[#252525] text-neutral-300 hover:text-white text-left transition-colors"
+                        >
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
+                          <span className="truncate">{tag.name}</span>
+                          <Check size={12} className="ml-auto text-emerald-400" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex flex-wrap gap-1.5">
-                  {asset.collections.map(colId => {
-                    const col = state.collections.find(c => c.id === colId);
-                    if (!col) return null;
-                    return (
-                      <span key={col.id} className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-[#252525] border border-neutral-700 text-amber-400">
-                        <Layers size={11} />
-                        {col.name}
-                      </span>
-                    );
-                  })}
+                {/* ---- 集合 ---- */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-medium text-neutral-400 flex items-center gap-1">
+                      <Layers size={11} /> 集合
+                    </span>
+                    {unassignedCollections.length > 0 && (
+                      <button
+                        onClick={() => setEditingAssoc(editingAssoc === 'collection' ? null : 'collection')}
+                        className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 transition-colors"
+                        title="添加集合"
+                      >
+                        <Plus size={11} /> 添加集合
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5">
+                    {asset.collections.map(colId => {
+                      const col = state.collections.find(c => c.id === colId);
+                      if (!col) return null;
+                      return (
+                        <span key={col.id} className="group inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-[#252525] border border-neutral-700 text-amber-400">
+                          <Layers size={11} />
+                          {col.name}
+                          <button
+                            onClick={() => removeCollection(col.id)}
+                            className="text-neutral-500 hover:text-red-400 transition-colors ml-0.5"
+                            title="移出该集合"
+                          >
+                            <X size={11} />
+                          </button>
+                        </span>
+                      );
+                    })}
+                    {asset.collections.length === 0 && <span className="text-xs text-neutral-600 italic">暂无集合</span>}
+                  </div>
+
+                  {/* 添加集合选择器 */}
+                  {editingAssoc === 'collection' && unassignedCollections.length > 0 && (
+                    <div className="mt-2 bg-[#161616] border border-neutral-700 rounded-md p-2 space-y-1">
+                      {unassignedCollections.map(col => (
+                        <button
+                          key={col.id}
+                          onClick={() => addCollection(col.id)}
+                          className="w-full flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-[#252525] text-amber-300 hover:text-amber-200 text-left transition-colors"
+                        >
+                          <Layers size={11} className="shrink-0" />
+                          <span className="truncate">{col.name}</span>
+                          <Check size={12} className="ml-auto text-emerald-400" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -307,7 +421,6 @@ export function PropertiesPanel({
         </div>
       );
     }
-
     // Bulk selection
     const totalCount = selectedAssets.length + selectedFolders.length;
     const totalSize = selectedAssets.reduce((sum, a) => sum + a.size, 0);
