@@ -7,6 +7,7 @@ import {
 import { Asset, Folder, SelectionItem } from '../types';
 import { cn, formatBytes } from '../lib/utils';
 import { openInWindowsExplorer } from '../services/desktopBridge';
+import { ThumbnailImage } from './ThumbnailImage';
 
 interface MonitoredSplitViewProps {
   folders: Folder[];
@@ -319,16 +320,11 @@ export function MonitoredSplitView({
                         )}
                       >
                         <div className="w-full aspect-video bg-[#1e1e1e] rounded flex items-center justify-center overflow-hidden mb-1.5 relative">
-                          {asset.thumbnailUrl ? (
-                            <img 
-                              src={asset.thumbnailUrl} 
-                              alt={asset.name} 
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform" 
-                            />
-                          ) : (
-                            getAssetIcon(asset.type)
-                          )}
+                          <ThumbnailImage
+                            asset={asset}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                            fallbackIcon={getAssetIcon(asset.type)}
+                          />
                           <span className="absolute bottom-1 right-1 text-[9px] font-mono px-1 py-0.2 rounded bg-black/70 text-neutral-300">
                             {formatBytes(asset.size)}
                           </span>
@@ -447,16 +443,11 @@ export function MonitoredSplitView({
                         )}
                       >
                         <div className="w-full aspect-video bg-[#1e1e1e] rounded flex items-center justify-center overflow-hidden mb-1.5 relative">
-                          {asset.thumbnailUrl ? (
-                            <img 
-                              src={asset.thumbnailUrl} 
-                              alt={asset.name} 
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform" 
-                            />
-                          ) : (
-                            getAssetIcon(asset.type)
-                          )}
+                          <ThumbnailImage
+                            asset={asset}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                            fallbackIcon={getAssetIcon(asset.type)}
+                          />
                           <span className="absolute bottom-1 right-1 text-[9px] font-mono px-1 py-0.2 rounded bg-black/70 text-neutral-300">
                             {formatBytes(asset.size)}
                           </span>

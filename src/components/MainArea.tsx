@@ -346,9 +346,9 @@ export function MainArea({
                         >
                           <div className="w-8 h-8 flex items-center justify-center shrink-0 rounded overflow-hidden bg-[#111]">
                             {(() => {
-                              const thumbUrl = asset.thumbnailUrl || thumbnails[asset.id];
-                              if (thumbUrl) {
-                                return <img src={thumbUrl} alt="" className="w-full h-full object-cover" />;
+                              // 只使用 thumbnails 中的 base64 data URL，绝不使用 asset.thumbnailUrl 原始文件路径
+                              if (thumbnails[asset.id]) {
+                                return <img src={thumbnails[asset.id]} alt="" className="w-full h-full object-cover" />;
                               }
                               ensureThumbnail(asset);
                               return getAssetIcon(asset.type);

@@ -10,6 +10,7 @@ import { TagProperties } from './properties/TagProperties';
 import { CollectionProperties } from './properties/CollectionProperties';
 import { SmartFolderProperties } from './properties/SmartFolderProperties';
 import { FolderProperties } from './properties/FolderProperties';
+import { ThumbnailImage } from './ThumbnailImage';
 
 interface PropertiesPanelProps {
   state: AssetState;
@@ -90,11 +91,12 @@ export function PropertiesPanel({
         <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col h-full overflow-y-auto custom-scrollbar select-none">
           <div className="p-4 border-b border-neutral-800 bg-[#191919]">
             <div className="w-full aspect-video bg-[#111] rounded-lg overflow-hidden flex items-center justify-center border border-neutral-800 mb-3 shadow-inner">
-              {asset.thumbnailUrl ? (
-                <img src={asset.thumbnailUrl} alt={asset.name} className="w-full h-full object-cover" />
-              ) : (
-                <ImageIcon size={48} className="text-neutral-700" />
-              )}
+              <ThumbnailImage
+                asset={asset}
+                className="w-full h-full object-cover"
+                fallbackIcon={<ImageIcon size={48} className="text-neutral-700" />}
+                loading="eager"
+              />
             </div>
             <div className="text-[10px] uppercase font-semibold text-neutral-500 tracking-wider">资产属性</div>
             <h2 className="text-sm font-semibold text-white break-all leading-tight mt-0.5">{asset.name}</h2>
