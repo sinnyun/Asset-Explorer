@@ -2,7 +2,7 @@
 //! 模块：本地数据库与数据操作引擎 (database.rs)
 //! 职责：负责本地 SQLite 嵌入式数据库生命周期、表结构初始化与迁移、所有的 CRUD
 //! 数据持久化操作以及高性能原子事务批处理。
-//! 依赖开源库：`rusqlite`, `parking_lot`, `dirs`
+//! 依赖开源库：`rusqlite`, `parking_lot`, `dirs`, `fs_extra`
 //! ============================================================================
 
 use crate::models::{Asset, Collection, Folder, SmartFolder, SmartFolderRule, Tag};
@@ -153,6 +153,7 @@ impl Database {
 
     /// 核心功能：完整本地数据迁移
     /// 将数据库、WAL 事务日志、全部缩略图缓存迁移至新目录，更新配置，并支持重启
+    /// 使用 fs_extra 开源库替代手写目录复制逻辑
     pub fn migrate_storage(&self, new_dir: &Path) -> Result<(), String> {
         if !new_dir.exists() {
             fs::create_dir_all(new_dir).map_err(|e| format!("创建目标新目录失败: {}", e))?;
@@ -171,16 +172,16 @@ impl Database {
             }
         }
 
-        // 3. 递归复制全部缩略图缓存目录
+        // 3. 递归复制全部缩略图缓存目录（使用 fs_extra 开源库替代手写 read_dir 遍历）
         let src_thumb = self.data_dir.join("thumbnails");
         let dest_thumb = new_dir.join("thumbnails");
         if src_thumb.exists() {
-            let _ = fs::create_dir_all(&dest_thumb);
-            if let Ok(entries) = fs::read_dir(&src_thumb) {
-                for entry in entries.flatten() {
-                    let dest_file = dest_thumb.join(entry.file_name());
-                    let _ = fs::copy(entry.path(), dest_file);
-                }
+            fs::create_dir_all(&dest_thumb).map_err(|e| format!("创建缩略图目标目录失败: {}", e))?;
+            // copy_inside=false(默认): 将源目录内容复制到目标目录中
+            let mut copy_opts = fs_extra::dir::CopyOptions::new();
+            copy_opts.overwrite = true;
+            if let Err(e) = fs_extra::dir::copy(&src_thumb, &dest_thumb, &copy_opts) {
+                eprintln!("[Database] 递归复制缩略图目录失败: {}", e);
             }
         }
 
@@ -289,23 +290,40 @@ impl Database {
         )
         .map_err(|e| format!("数据库表结构初始化失败: {}", e))?;
 
-        // 迁移旧数据库：为 tags 表添加 description 和 is_pinned 列（如果不存在，ALTER ADD COLUMN 会静默忽略重复添加错误）
-        let _ = conn.execute_batch(
-            "ALTER TABLE tags ADD COLUMN description TEXT DEFAULT NULL;",
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE tags ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;",
-        );
-        // 迁移旧数据库：为 collections 表添加 color、description 和 is_pinned 列（如果不存在）
-        let _ = conn.execute_batch(
-            "ALTER TABLE collections ADD COLUMN color TEXT DEFAULT NULL;",
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE collections ADD COLUMN description TEXT DEFAULT NULL;",
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE collections ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;",
-        );
+        // 兼容旧版数据库：通过 PRAGMA table_info 检查列是否存在，避免 ALTER 报错后仍忽略
+        // 替代之前"重复执行报错就忽略"的 hack 方式
+        let existing_columns = |table: &str| -> Vec<String> {
+            let mut stmt = match conn.prepare(&format!("PRAGMA table_info({})", table)) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let cols = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .and_then(|iter| iter.collect())
+                .unwrap_or_default();
+            cols
+        };
+
+        // tags 表迁移
+        let tag_cols = existing_columns("tags");
+        if !tag_cols.is_empty() && !tag_cols.iter().any(|c| c == "description") {
+            let _ = conn.execute_batch("ALTER TABLE tags ADD COLUMN description TEXT DEFAULT NULL;");
+        }
+        if !tag_cols.is_empty() && !tag_cols.iter().any(|c| c == "is_pinned") {
+            let _ = conn.execute_batch("ALTER TABLE tags ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
+        }
+
+        // collections 表迁移
+        let col_cols = existing_columns("collections");
+        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "color") {
+            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN color TEXT DEFAULT NULL;");
+        }
+        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "description") {
+            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN description TEXT DEFAULT NULL;");
+        }
+        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "is_pinned") {
+            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
+        }
 
         Ok(())
     }

@@ -13,7 +13,6 @@ use crate::models::{AggregationReport, Asset, Collection, Folder, ScanResult, Sm
 use crate::thumbnail_cache::generate_or_get_thumbnail;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 use tauri::State;
 
 /// 前端初始化全量工作区状态
@@ -252,23 +251,12 @@ pub async fn get_thumbnail(db: State<'_, Database>, asset_id: String, path: Stri
     .map_err(|e| e.to_string())?
 }
 
-/// 指令 19: 在 Windows 资源管理器中高亮定位文件
+/// 指令 19: 在系统文件管理器中高亮定位文件
+/// 使用 opener 开源库替代手写 explorer 命令，支持跨平台
 #[tauri::command]
 pub async fn open_in_file_manager(path: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            Command::new("explorer")
-                .arg(format!("/select,\"{}\"", path))
-                .spawn()
-                .map_err(|e| format!("打开资源管理器失败: {}", e))?;
-            Ok(())
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = path;
-            Ok(())
-        }
+        opener::reveal(&path).map_err(|e| format!("在文件管理器中定位文件失败: {}", e))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -334,6 +322,7 @@ pub fn validate_assets(db: State<'_, Database>) -> Result<ValidationResult, Stri
 }
 
 /// 指令 25: 读取缩略图文件并以 base64 data URL 返回（绕过浏览器 file:// 安全限制）
+/// 使用 mime_guess 开源库替代手写 MIME 推断
 #[tauri::command]
 pub fn read_thumbnail_base64(file_path: String) -> Result<String, String> {
     let path = std::path::Path::new(&file_path);
@@ -342,17 +331,14 @@ pub fn read_thumbnail_base64(file_path: String) -> Result<String, String> {
     }
     let bytes = std::fs::read(path).map_err(|e| format!("读取缩略图失败: {}", e))?;
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-    // 根据文件扩展名推断 MIME 类型，默认 PNG
+
+    // 使用 mime_guess 根据扩展名推断 MIME 类型
     let mime = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| match e.to_lowercase().as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "bmp" => "image/bmp",
-            _ => "image/png",
-        })
-        .unwrap_or("image/png");
+        .and_then(|ext| mime_guess::from_ext(ext).first())
+        .map(|m| m.essence_str().to_string())
+        .unwrap_or_else(|| "image/png".to_string());
+
     Ok(format!("data:{};base64,{}", mime, b64))
 }

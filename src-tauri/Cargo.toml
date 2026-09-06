@@ -16,6 +16,7 @@ tauri = { version = "2.0", features = [] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.0"
 tauri-plugin-fs = "2.0"
+tauri-plugin-single-instance = "2.0"
 
 # Serialization & JSON (Industry standard)
 serde = { version = "1.0", features = ["derive"] }
@@ -36,6 +37,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 # MIME Type & File Type Inference
 infer = "0.16"
+mime_guess = "2.0"
 
 # Hash Computation (Quick Duplicate Detection & Cache Keys)
 sha2 = "0.10"
@@ -49,6 +51,12 @@ dirs = "5.0"
 
 # Embedded High-Performance Local Database (SQLite with zero external dependencies)
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Cross-platform file/directory operations
+fs_extra = "1.2"
+
+# Cross-platform "open in file manager" / "reveal file"
+opener = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [

@@ -15,35 +15,6 @@ use database::Database;
 use std::sync::Arc;
 
 fn main() {
-    // ========================================================================
-    // 机制 1：单实例运行防护 (Windows 原生命名互斥锁)
-    // 防止重复启动应用、避免多个进程竞争 SQLite 数据库或端口产生僵尸进程
-    // ========================================================================
-    #[cfg(target_os = "windows")]
-    unsafe {
-        use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-        use windows_sys::Win32::System::Threading::CreateMutexW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
-        };
-
-        let mutex_name: Vec<u16> = "Global\\AssetHub_Desktop_SingleInstance\0"
-            .encode_utf16()
-            .collect();
-        let _h_mutex = CreateMutexW(std::ptr::null(), 1, mutex_name.as_ptr());
-
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            let win_title: Vec<u16> = "Asset Hub\0".encode_utf16().collect();
-            let hwnd = FindWindowW(std::ptr::null(), win_title.as_ptr());
-            if hwnd != 0 {
-                ShowWindow(hwnd, SW_RESTORE);
-                SetForegroundWindow(hwnd);
-            }
-            eprintln!("[SingleInstance] 检测到已有 AssetHub 实例正在运行，已唤醒已有窗口，新进程自动退出。");
-            std::process::exit(0);
-        }
-    }
-
     // 初始化本地 SQLite 数据库 (高并发 WAL 模式)
     let db = Database::init().unwrap_or_else(|err| {
         eprintln!("[Warning] 本地文件数据库初始化失败，切换至内存模式: {}", err);
@@ -57,6 +28,16 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        // 机制 1：单实例运行防护 (使用 tauri-plugin-single-instance 开源库替代手写 Windows Mutex)
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 当检测到第二个实例启动时，将已运行的窗口恢复到前台
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            println!("[SingleInstance] 检测到已有 AssetHub 实例正在运行，已唤醒已有窗口，新进程自动退出。");
+        }))
         .manage(db.clone())
         // ====================================================================
         // 机制 2：启动时自动校验资产有效性并挂载文件监听器
