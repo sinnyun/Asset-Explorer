@@ -16,6 +16,7 @@ interface MonitoredSplitViewProps {
   onContextMenuAsset: (e: React.MouseEvent, id: string) => void;
   onContextMenuFolder: (e: React.MouseEvent, id: string) => void;
   onSelectFolder: (id: string) => void;
+  onPreviewAsset?: (asset: Asset) => void;
 }
 
 export function MonitoredSplitView({
@@ -26,6 +27,7 @@ export function MonitoredSplitView({
   onContextMenuAsset,
   onContextMenuFolder,
   onSelectFolder,
+  onPreviewAsset,
 }: MonitoredSplitViewProps) {
   const [col1Search, setCol1Search] = useState('');
   const [col2Search, setCol2Search] = useState('');
@@ -313,6 +315,7 @@ export function MonitoredSplitView({
                         key={asset.id}
                         onClick={(e) => onToggleSelection(asset.id, 'asset', e.ctrlKey || e.metaKey)}
                         onContextMenu={(e) => onContextMenuAsset(e, asset.id)}
+                        onDoubleClick={() => onPreviewAsset?.(asset)}
                         className={cn(
                           "group rounded-lg border p-2 bg-[#141414] cursor-pointer transition-all hover:border-neutral-700 relative flex flex-col",
                           isSelected ? "border-blue-500 ring-1 ring-blue-500/50 bg-blue-500/5" : "border-neutral-800"
@@ -436,6 +439,7 @@ export function MonitoredSplitView({
                         key={asset.id}
                         onClick={(e) => onToggleSelection(asset.id, 'asset', e.ctrlKey || e.metaKey)}
                         onContextMenu={(e) => onContextMenuAsset(e, asset.id)}
+                        onDoubleClick={() => onPreviewAsset?.(asset)}
                         className={cn(
                           "group rounded-lg border p-2 bg-[#141414] cursor-pointer transition-all hover:border-neutral-700 relative flex flex-col",
                           isSelected ? "border-purple-500 ring-1 ring-purple-500/50 bg-purple-500/5" : "border-neutral-800"

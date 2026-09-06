@@ -12,6 +12,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { AddMonitoredFolderModal } from './components/AddMonitoredFolderModal';
 import { CreateEntityModal } from './components/CreateEntityModal';
 import { RenameModal } from './components/RenameModal';
+import { AssetPreviewOverlay } from './components/preview/AssetPreviewOverlay';
 import { smartFolders } from './data';
 import { useAppState } from './hooks/useAppState';
 import { useFileMonitoring } from './hooks/useFileMonitoring';
@@ -21,6 +22,7 @@ import { useEntityActions } from './hooks/useEntityActions';
 import { useContextMenuHandlers } from './hooks/useContextMenuHandlers';
 import { useMiscActions } from './hooks/useMiscActions';
 import { handleConfirmAddAndScan as scanAndAddFolder } from './hooks/useFolderScan';
+import type { Asset } from './types';
 
 export default function App() {
   const { state, setState } = useAppState();
@@ -37,6 +39,8 @@ export default function App() {
     initialValue: string;
     onConfirm: (newName: string) => void;
   }>({ isOpen: false, title: '', initialValue: '', onConfirm: () => {} });
+  // 全屏文件预览：双击资产时打开
+  const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
 
   useFileMonitoring(setState);
 
@@ -147,6 +151,7 @@ export default function App() {
         onContextMenuCanvas={handleContextMenuCanvas}
         onSelectFolder={handleSelectFolder}
         onAddMonitoredFolder={handleScanLocalFolder}
+        onPreviewAsset={(asset) => setPreviewAsset(asset)}
       />
       <PropertiesPanel 
         state={state} 
@@ -214,6 +219,11 @@ export default function App() {
         initialValue={renameModal.initialValue}
         onClose={() => setRenameModal(prev => ({ ...prev, isOpen: false }))}
         onConfirm={renameModal.onConfirm}
+      />
+
+      <AssetPreviewOverlay
+        asset={previewAsset}
+        onClose={() => setPreviewAsset(null)}
       />
     </div>
   );
