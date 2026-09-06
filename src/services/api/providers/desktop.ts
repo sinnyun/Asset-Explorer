@@ -1,0 +1,303 @@
+/**
+ * ============================================================================
+ * 统一 API 中间件 - 桌面 Provider（Rust IPC 实现）
+ *
+ * 在 Tauri 桌面环境中运行，通过 IPC 调用 Rust 后端，
+ * 底层使用本地 SQLite 数据库与原生文件系统操作。
+ *
+ * 遵循统一 ApiProvider 接口，前端无需感知此实现差异。
+ * ============================================================================
+ */
+
+import type {
+  Folder, Tag, Collection, SmartFolder,
+  AssetState, StorageStats,
+} from '../../../types';
+import type { ApiProvider, ScanResult } from '../types';
+import { normalizeFolders, normalizeAssets } from '../utils';
+
+// ============================================================================
+// Rust IPC 类型定义
+// ============================================================================
+
+/** Rust 后端返回的工作区载荷 */
+interface RustWorkspacePayload {
+  folders: any[];
+  tags: any[];
+  collections: any[];
+  smart_folders: any[];
+  assets: any[];
+}
+
+/** Rust 后端返回的扫描结果 */
+interface RustScanPayload {
+  root_folder: any;
+  sub_folders: any[];
+  assets: any[];
+  total_files_scanned: number;
+  total_duration_ms: number;
+}
+
+// ============================================================================
+// Rust IPC 工具函数
+// ============================================================================
+
+/** 检测是否为 Tauri 桌面环境 */
+export function isTauriDesktop(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    '__TAURI__' in window ||
+    '__TAURI_INTERNALS__' in window ||
+    (window as any).__TAURI_IPC__ !== undefined
+  );
+}
+
+/** 封装安全的 Tauri invoke 调用 */
+async function callRust<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
+  if (!isTauriDesktop()) {
+    console.warn(`[DesktopApi] 非桌面环境，跳过 Rust 命令: ${cmd}`);
+    return null;
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<T>(cmd, args);
+  } catch (err: any) {
+    if (err instanceof Error && (err.message?.includes('import') || err.message?.includes('module'))) {
+      console.warn(`[DesktopApi] 动态导入 @tauri-apps/api/core 失败（可能 Vite HMR 未就绪）:`, err.message);
+    } else {
+      console.warn(`[DesktopApi] 调用 Rust 命令 ${cmd} 失败:`, err);
+    }
+    return null;
+  }
+}
+
+// ============================================================================
+// Desktop Provider 实现
+// ============================================================================
+
+class DesktopApiProvider implements ApiProvider {
+  readonly isDesktop = true;
+  readonly platform = 'desktop' as const;
+  readonly envLabel = '[环境:桌面·Rust]';
+
+  // ------------------------------------------------------------------------
+  // 数据加载与扫描
+  // ------------------------------------------------------------------------
+
+  /** 加载完整工作区数据（Rust SQLite） */
+  async loadWorkspace(): Promise<Partial<AssetState>> {
+    // 尝试加载，最多重试 2 次（解决 Vite HMR 初始化期间 IPC 可能失败的问题）
+    let payload: RustWorkspacePayload | null = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      payload = await callRust<RustWorkspacePayload>('load_workspace');
+      if (payload !== null) break;
+      if (attempt < 2) {
+        console.warn(`[DesktopApi] Rust IPC 返回空（第 ${attempt} 次），等待 500ms 后重试...`);
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    if (payload === null) {
+      // 非桌面环境或 IPC 不可用时返回空数据
+      return { folders: [], tags: [], collections: [], customSmartFolders: [], assets: [] };
+    }
+
+    // 标准化：确保 parentId 为 null 时转 undefined、tags/collections 不为 undefined
+    const folders = normalizeFolders(payload.folders);
+    const assets = normalizeAssets(payload.assets);
+
+    // 标准化 SmartFolder：rules/matchAll 字段
+    const customSmartFolders = (payload.smart_folders || []).map((sf: any) => ({
+      ...sf,
+      rules: sf.rules ?? [],
+      matchAll: sf.matchAll ?? true,
+    }));
+
+    return {
+      folders,
+      tags: payload.tags || [],
+      collections: payload.collections || [],
+      customSmartFolders,
+      assets,
+    };
+  }
+
+  /** 扫描本地目录（Rust walkdir 索引） */
+  async scanDirectory(path: string): Promise<ScanResult | null> {
+    const raw = await callRust<RustScanPayload>('scan_directory', { path });
+    if (!raw) return null;
+
+    return {
+      root_folder: normalizeFolders([raw.root_folder])[0],
+      sub_folders: normalizeFolders(raw.sub_folders),
+      assets: normalizeAssets(raw.assets),
+      total_files_scanned: raw.total_files_scanned,
+      total_duration_ms: raw.total_duration_ms,
+    };
+  }
+
+  /** 懒加载获取资产缩略图 */
+  async getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
+    // 场景 1：已有缩略图缓存 → 直接读取 base64 返回
+    if (existingThumbnailUrl) {
+      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: existingThumbnailUrl });
+      if (dataUrl) return dataUrl;
+      // 缓存文件不存在，降级到重新生成
+    }
+
+    // 场景 2：调用 Rust 从源文件生成缩略图
+    const thumbPath = await callRust<string>('get_thumbnail', { assetId, path, maxDimension: 256 });
+    if (thumbPath) {
+      // 通过 IPC 读取缩略图 base64
+      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: thumbPath });
+      if (dataUrl) return dataUrl;
+      // 兜底：尝试 convertFileSrc
+      try {
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        return convertFileSrc(thumbPath);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /** 校验资产有效性 */
+  async validateAssets(): Promise<void> {
+    const result = await callRust<{ deleted_count: number; total_checked: number }>('validate_assets');
+    if (result && result.deleted_count > 0) {
+      console.log(`[DesktopApi] 资产有效性校验: 检查 ${result.total_checked} 个, 清理 ${result.deleted_count} 个无效路径`);
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // 资产操作
+  // ------------------------------------------------------------------------
+
+  async setAssetRating(id: string, rating: number): Promise<void> {
+    await callRust<void>('set_asset_rating', { id, rating });
+  }
+
+  async setAssetFavorite(id: string, favorite: boolean): Promise<void> {
+    await callRust<void>('set_asset_favorite', { id, favorite });
+  }
+
+  async deleteAssets(ids: string[]): Promise<void> {
+    await callRust<void>('delete_assets', { ids });
+  }
+
+  // ------------------------------------------------------------------------
+  // 文件夹 CRUD
+  // ------------------------------------------------------------------------
+
+  async createFolder(folder: Folder): Promise<void> {
+    await callRust<void>('create_folder', { folder });
+  }
+
+  async updateFolder(folder: Folder): Promise<void> {
+    await callRust<void>('update_folder', { folder });
+  }
+
+  async deleteFolder(id: string): Promise<void> {
+    await callRust<void>('delete_folder', { id });
+  }
+
+  // ------------------------------------------------------------------------
+  // 标签 CRUD
+  // ------------------------------------------------------------------------
+
+  async createTag(tag: Tag): Promise<void> {
+    await callRust<void>('create_tag', { tag });
+  }
+
+  async updateTag(tag: Tag): Promise<void> {
+    await callRust<void>('update_tag', { id: tag.id, tag });
+  }
+
+  async deleteTag(id: string): Promise<void> {
+    await callRust<void>('delete_tag', { id });
+  }
+
+  // ------------------------------------------------------------------------
+  // 集合 CRUD
+  // ------------------------------------------------------------------------
+
+  async createCollection(col: Collection): Promise<void> {
+    await callRust<void>('create_collection', { collection: col });
+  }
+
+  async updateCollection(col: Collection): Promise<void> {
+    await callRust<void>('update_collection', { id: col.id, collection: col });
+  }
+
+  async deleteCollection(id: string): Promise<void> {
+    await callRust<void>('delete_collection', { id });
+  }
+
+  // ------------------------------------------------------------------------
+  // 智能文件夹 CRUD
+  // ------------------------------------------------------------------------
+
+  async saveSmartFolder(sf: SmartFolder): Promise<void> {
+    await callRust<void>('save_smart_folder', { smartFolder: sf });
+  }
+
+  async deleteSmartFolder(id: string): Promise<void> {
+    await callRust<void>('delete_smart_folder', { id });
+  }
+
+  // ------------------------------------------------------------------------
+  // 系统操作
+  // ------------------------------------------------------------------------
+
+  /** 打开资源管理器 */
+  async openInExplorer(path: string): Promise<void> {
+    await callRust<void>('open_in_file_manager', { path });
+  }
+
+  /** 弹出文件夹选取对话框 */
+  async pickDirectory(): Promise<string | null> {
+    if (!isTauriDesktop()) return null;
+    try {
+      const tauri = (window as any).__TAURI__;
+      if (tauri?.dialog?.open) {
+        const selected = await tauri.dialog.open({ directory: true, multiple: false });
+        return typeof selected === 'string' ? selected : null;
+      }
+    } catch (e) {
+      console.warn("[DesktopApi] 文件夹选取失败:", e);
+    }
+    return null;
+  }
+
+  /** 获取存储统计 */
+  async getStorageStats(): Promise<StorageStats> {
+    const stats = await callRust<any>('get_storage_stats');
+    if (stats) {
+      return {
+        data_dir: stats.data_dir || '',
+        db_size_bytes: stats.db_size_bytes || 0,
+        thumbnails_size_bytes: stats.thumbnails_size_bytes || 0,
+        total_size_bytes: stats.total_size_bytes || 0,
+        asset_count: stats.asset_count || 0,
+      };
+    }
+    // 降级默认值
+    return { data_dir: '', db_size_bytes: 0, thumbnails_size_bytes: 0, total_size_bytes: 0, asset_count: 0 };
+  }
+
+  /** 完整数据迁移 */
+  async migrateDataStorage(newPath: string): Promise<string> {
+    const res = await callRust<string>('migrate_data_storage', { newPath });
+    if (res) return res;
+    throw new Error("Rust 后端迁移返回空响应");
+  }
+
+  /** 重启应用 */
+  async restartApplication(): Promise<void> {
+    await callRust<void>('restart_application');
+  }
+}
+
+/** 桌面 Provider 单例 */
+export const desktopProvider = new DesktopApiProvider();

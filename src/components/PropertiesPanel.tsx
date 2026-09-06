@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { AssetState, Folder as FolderType, Asset, SmartFolder, Tag, Collection } from '../types';
 import { formatBytes, formatDate, cn } from '../lib/utils';
-import { openInWindowsExplorer } from '../services/desktopBridge';
+import { apiClient } from '../services/api';
 import { TagProperties } from './properties/TagProperties';
 import { CollectionProperties } from './properties/CollectionProperties';
 import { SmartFolderProperties } from './properties/SmartFolderProperties';
@@ -108,7 +108,7 @@ export function PropertiesPanel({
               <label className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block mb-2">快捷操作</label>
               <div className="space-y-1.5">
                 <button
-                  onClick={() => openInWindowsExplorer(asset.path)}
+                  onClick={() => apiClient.openInExplorer(asset.path)}
                   className="w-full flex items-center justify-center gap-2 text-xs py-2 px-3 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors shadow-lg shadow-blue-600/20"
                 >
                   <ExternalLink size={14} /> 打开资源管理器定位

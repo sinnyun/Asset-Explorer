@@ -18,7 +18,7 @@ import {
   Edit2, Trash2, ExternalLink, FolderOpen, Pin, ArrowUp, ArrowDown, Info,
   LayoutGrid, List, CheckSquare, Plus, RefreshCw, FolderPlus, Layers, Tag as TagIcon 
 } from 'lucide-react';
-import { isTauriDesktop, openInWindowsExplorer } from './services/desktopBridge';
+import { apiClient, runtime } from './services/api';
 import { dataService } from './services/dataService';
 
 export default function App() {
@@ -27,7 +27,7 @@ export default function App() {
   /**
    * 初始状态懒初始化：始终使用空数据，不依赖环境检测
    *
-   * 原因：`isTauriDesktop()`（检查 window.__TAURI__）在 React 初始化时可能尚未注入，
+   * 原因：`runtime.isDesktop`（检查 window.__TAURI__）在 React 初始化时可能尚未注入，
    * 导致第一帧渲染错误地使用了 mock 数据（C:/Workspace 路径）。
    * 而 C:/Workspace 这些路径只应存在于 Web 开发环境的模拟数据中，不应出现在桌面模式。
    *
@@ -105,7 +105,7 @@ export default function App() {
 
   // 桌面模式：监听文件监控器实时事件（资产新增/删除/修改）
   useEffect(() => {
-    if (!isTauriDesktop()) return;
+    if (!runtime.isDesktop) return;
 
     let unlisteners: Array<() => void> = [];
 
@@ -479,7 +479,7 @@ export default function App() {
           label: '在资源管理器中定位', 
           icon: <FolderOpen size={14}/>, 
           onClick: () => {
-            openInWindowsExplorer(asset.path).catch(console.error);
+            apiClient.openInExplorer(asset.path).catch(console.error);
           } 
         },
         { divider: true, label: '' },
@@ -512,7 +512,7 @@ export default function App() {
         { label: folder.isPinned ? '取消置顶' : '置顶文件夹', icon: <Pin size={14}/>, onClick: () => handleTogglePinFolder(id) },
         { label: '在同级目录中上移', icon: <ArrowUp size={14}/>, onClick: () => handleMoveFolder(id, 'up') },
         { label: '在同级目录中下移', icon: <ArrowDown size={14}/>, onClick: () => handleMoveFolder(id, 'down') },
-        { label: '打开资源管理器定位', icon: <FolderOpen size={14}/>, onClick: () => openInWindowsExplorer(folder.path) },
+        { label: '打开资源管理器定位', icon: <FolderOpen size={14}/>, onClick: () => apiClient.openInExplorer(folder.path) },
         { divider: true, label: '' },
         { label: '重命名目录', icon: <Edit2 size={14}/>, onClick: () => {
           setRenameModal({
@@ -847,7 +847,7 @@ export default function App() {
       detectedParentId = existingParent.id;
     }
 
-    if (isTauriDesktop()) {
+    if (runtime.isDesktop) {
       const result = await dataService.scanDirectory(folderPath.trim());
       if (result) {
         const root = {

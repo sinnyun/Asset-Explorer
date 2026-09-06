@@ -4,7 +4,7 @@ import {
   CheckCircle2, Loader2, Sparkles, HardDrive, ArrowRight 
 } from 'lucide-react';
 import { Folder } from '../types';
-import { isTauriDesktop, pickDirectoryViaDialog } from '../services/desktopBridge';
+import { apiClient, runtime } from '../services/api';
 
 interface AddMonitoredFolderModalProps {
   isOpen: boolean;
@@ -68,9 +68,9 @@ export function AddMonitoredFolderModal({
   if (!isOpen) return null;
 
   const handleBrowseFolder = async () => {
-    if (isTauriDesktop()) {
+    if (runtime.isDesktop) {
       try {
-        const selected = await pickDirectoryViaDialog();
+        const selected = await apiClient.pickDirectory();
         if (selected && typeof selected === 'string') {
           setFolderPath(selected);
           const parts = selected.split(/[/\\]/);
@@ -150,7 +150,7 @@ export function AddMonitoredFolderModal({
                 onClick={handleBrowseFolder}
                 className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 font-normal underline"
               >
-                <HardDrive size={12} /> {isTauriDesktop() ? '浏览选择文件夹' : '切换测试路径'}
+                <HardDrive size={12} /> {runtime.isDesktop ? '浏览选择文件夹' : '切换测试路径'}
               </button>
             </label>
             <div className="flex gap-2">
