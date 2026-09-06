@@ -279,15 +279,13 @@ class DesktopApiProvider implements ApiProvider {
     await callRust<void>('open_in_file_manager', { path });
   }
 
-  /** 弹出文件夹选取对话框 */
+  /** 弹出文件夹选取对话框（Tauri v2 plugin-dialog） */
   async pickDirectory(): Promise<string | null> {
     if (!isTauriDesktop()) return null;
     try {
-      const tauri = (window as any).__TAURI__;
-      if (tauri?.dialog?.open) {
-        const selected = await tauri.dialog.open({ directory: true, multiple: false });
-        return typeof selected === 'string' ? selected : null;
-      }
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({ directory: true, multiple: false });
+      return typeof selected === 'string' ? selected : null;
     } catch (e) {
       console.warn("[DesktopApi] 文件夹选取失败:", e);
     }
