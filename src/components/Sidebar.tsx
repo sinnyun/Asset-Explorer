@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Monitor, Filter, Plus, Settings, Hash, Layers, FolderPlus } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { AssetState, SidebarTab, SmartFolder } from '../types';
-import { NavItem, useSidebarData, renderFolderTree, renderFlatFolders, SearchBar, getSmartIcon } from './sidebar';
+import { NavItem, useSidebarData, renderFolderTree, renderFlatFolders, SearchBar, getSmartIcon } from './sidebar/index';
 
 interface SidebarProps {
   state: AssetState;
