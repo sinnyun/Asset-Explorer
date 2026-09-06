@@ -9,14 +9,22 @@ echo                       架构：Rust + Tauri v2 + React 19
 echo ===============================================================================
 echo.
 
+:: 【重要说明】cmd 批处理语法陷阱：在 if/for 的括号块 ( ... ) 内部，
+:: echo 文本中不能出现未转义的右括号 ")"，否则会被解析器误认为"块结束"，
+:: 导致整个脚本立即中止（报错形如 ": was unexpected at this time."）。
+:: 因此本脚本所有括号块内的提示文本一律使用全角括号 【】 代替半角 ()。
+
 :: 1. 检查 Node.js 环境
 echo [1/5] 检查 Node.js 运行时...
 where node >nul 2>nul
 if %errorlevel% neq 0 (
     color 0C
-    echo [错误] 未检测到 Node.js，请先安装 Node.js (推荐 v18+ 或 v20+):
+    echo.
+    echo [错误] 步骤 1/5 失败：未检测到 Node.js，错误码 %errorlevel%
+    echo 请先安装 Node.js【推荐 v18+ 或 v20+】
     echo 官方下载地址: https://nodejs.org/
     echo 安装完成后，请重新双击本脚本。
+    echo.
     pause
     exit /b 1
 )
@@ -29,13 +37,15 @@ echo [2/5] 检查 Rust/Cargo 编译工具链...
 where cargo >nul 2>nul
 if %errorlevel% neq 0 (
     color 0E
-    echo [警告] 未检测到 Rust/Cargo 编译器。
+    echo.
+    echo [错误] 步骤 2/5 失败：未检测到 Rust/Cargo 编译器，错误码 %errorlevel%
     echo Tauri 桌面程序需要 Rust 环境。
-    echo 正在为您打开 Rust 官方安装页面 (https://rustup.rs/)...
+    echo 正在为您打开 Rust 官方安装页面 https://rustup.rs/ ...
     start https://rustup.rs/
     echo.
     echo 请下载并运行 rustup-init.exe，安装时直接按回车选择默认配置。
     echo 安装完成后，请关闭并重新运行本脚本。
+    echo.
     pause
     exit /b 1
 )
@@ -49,15 +59,23 @@ if not exist .env (
     if exist .env.example (
         copy .env.example .env >nul
         echo [OK] 已自动从 .env.example 复制生成 .env 配置文件！
+    ) else (
+        echo [警告] 未找到 .env 与 .env.example，程序将使用默认配置启动。
     )
+) else (
+    echo [OK] 检测到已有 .env 配置文件，跳过创建。
 )
+echo.
 
 :: 4. 安装 Node.js 依赖
-echo [4/5] 检查并安装前端/Tauri 依赖包 (npm install)...
+echo [4/5] 检查并安装前端/Tauri 依赖包 npm install ...
 call npm install
 if %errorlevel% neq 0 (
     color 0C
-    echo [错误] npm 依赖安装失败，请检查网络或 npm 源设置！
+    echo.
+    echo [错误] 步骤 4/5 失败：npm 依赖安装出错，错误码 %errorlevel%
+    echo 请检查网络连接或 npm 源设置后重试。
+    echo.
     pause
     exit /b 1
 )
@@ -68,11 +86,13 @@ echo.
 echo [*] 执行单实例与防僵尸进程防护检查...
 set FOUND_ZOMBIE=0
 for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":3000" ^| findstr "LISTENING"') do (
-    echo [发现] 端口 3000 已被历史残留进程 (PID: %%a) 占用！
+    echo [发现] 端口 3000 已被历史残留进程 PID %%a 占用！
     echo 正在自动终止残留进程，避免重复启动造成后台卡死与僵尸进程...
     taskkill /f /pid %%a >nul 2>nul
     set FOUND_ZOMBIE=1
 )
+:: 开发模式实际二进制名为 Cargo 包名 eagle-asset-hub.exe，打包构建产物为 AssetHub.exe，两个都清理
+taskkill /f /im eagle-asset-hub.exe >nul 2>nul
 taskkill /f /im AssetHub.exe >nul 2>nul
 if "%FOUND_ZOMBIE%"=="1" (
     echo [OK] 已成功清理残留进程与占用端口，准备全新无锁启动。
@@ -82,7 +102,7 @@ if "%FOUND_ZOMBIE%"=="1" (
 echo.
 
 :: 5. 启动开发服务器与 Rust Tauri 桌面窗口
-echo [5/5] 正在启动 Rust + Tauri 本地桌面程序 (开发热重载模式)...
+echo [5/5] 正在启动 Rust + Tauri 本地桌面程序【开发热重载模式】...
 echo 首次启动时 Rust 将自动下载依赖库并编译后端模块，请稍候 1-2 分钟...
 echo.
 color 0A
@@ -91,8 +111,17 @@ call npm run desktop:dev
 if %errorlevel% neq 0 (
     color 0C
     echo.
-    echo [提示] 如果 Rust 编译报错，请确保已安装 Visual Studio C++ 生成工具 (MSVC):
-    echo 推荐安装: Visual Studio Build Tools (包含 C++ 开发工作负荷)
+    echo [错误] 步骤 5/5 失败：桌面程序启动或运行时出错，错误码 %errorlevel%
+    echo [提示] 如果 Rust 编译报错，请确保已安装 Visual Studio C++ 生成工具【MSVC】
+    echo 推荐安装: Visual Studio Build Tools【包含 C++ 开发工作负荷】
     echo 微软官方说明: https://vcpkg.io/en/getting-started
+    echo.
     pause
+    exit /b 1
 )
+
+:: 正常结束路径：同样需要手动按键后才退出，方便查看完整日志
+echo.
+echo [完成] 程序已正常退出，感谢使用！
+pause
+exit /b 0

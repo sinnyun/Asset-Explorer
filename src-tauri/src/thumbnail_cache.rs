@@ -71,9 +71,11 @@ mod windows_impl {
     use super::*;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{HBITMAP, HWND, S_OK};
+    // 注意：windows-sys 0.52 中 HBITMAP 定义在 Graphics::Gdi 模块（0.59+ 才移至 Foundation）
+    use windows_sys::Win32::Foundation::{HWND, S_OK};
     use windows_sys::Win32::Graphics::Gdi::{
-        DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        DeleteObject, GetDIBits, GetObjectW, HBITMAP, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS,
     };
     use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
     use windows_sys::core::GUID;
