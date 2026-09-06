@@ -2,23 +2,41 @@
  * ============================================================================
  * 模块：统一数据服务引擎 (dataService.ts)
  * 职责：
- * 1. 严格实现“前端纯显示，数据与数据库操作全在后端”的架构原则。
- * 2. 所有的增删改查操作通过非阻塞异步通道提交给 Rust 后端 SQLite 数据库。
- * 3. 保证前端界面绝不发生任何卡顿或线程堵塞。
+ * 1. 根据运行环境自动切换数据源：
+ *    - 桌面 Tauri 环境 → 通过 Rust IPC 操作本地 SQLite 数据库
+ *    - Web 环境（远程/本地）→ 通过 HTTP API 操作 PostgreSQL 数据库
+ *    - 降级策略 → 使用本地模拟数据
+ * 2. 保证前端界面绝不发生任何卡顿或线程堵塞。
  * ============================================================================
  */
 
 import { Asset, Folder, Tag, Collection, SmartFolder, AssetState } from '../types';
 import { mockAssets, mockFolders, mockTags, mockCollections } from '../data';
 import * as bridge from './desktopBridge';
+import * as api from './webApiClient';
+import { getEnvironment, getEnvironmentLabel } from './environment';
 
 class DataService {
   /**
+   * 数据源调试日志
+   */
+  private log(method: string, message: string) {
+    const env = getEnvironmentLabel();
+    console.log(`[DataService]${env} ${method}: ${message}`);
+  }
+
+  /**
    * 异步加载工作区数据
-   * 优先从 Rust 后端 SQLite 读取；若在 Web 预览环境中，则加载初始数据。
+   * 优先级：桌面 Rust SQLite > Web API PostgreSQL > 本地模拟数据
    */
   async loadWorkspace(): Promise<Partial<AssetState>> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    // ==================================================================
+    // 模式 1：桌面 Tauri 环境 → 优先从 Rust 后端 SQLite 读取
+    // ==================================================================
+    if (env.isDesktop) {
+      this.log('loadWorkspace', '使用桌面 Rust SQLite 后端');
       try {
         const payload = await bridge.loadWorkspaceFromRustDb();
         if (payload && (payload.folders.length > 0 || payload.assets.length > 0)) {
@@ -35,7 +53,34 @@ class DataService {
       }
     }
 
-    // Web 环境或首次空库降级
+    // ==================================================================
+    // 模式 2：Web 环境（远程/本地）→ 通过 Express API 连接 PostgreSQL
+    // ==================================================================
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      this.log('loadWorkspace', `使用 Web API PostgreSQL 后端 (${env.apiBaseUrl})`);
+      try {
+        const result = await api.loadWorkspace();
+        if (result.success && result.data) {
+          const { folders, tags, collections, assets, smartFolders } = result.data;
+          this.log('loadWorkspace', `成功加载 ${assets.length} 个资产, ${folders.length} 个文件夹`);
+          return {
+            folders,
+            tags,
+            collections,
+            customSmartFolders: smartFolders || [],
+            assets,
+          };
+        }
+        console.warn('[DataService] Web API 加载工作区返回空:', result.error);
+      } catch (err) {
+        console.warn('[DataService] 从 Web API 加载失败，采用模拟数据:', err);
+      }
+    }
+
+    // ==================================================================
+    // 模式 3：降级 → 使用本地模拟数据
+    // ==================================================================
+    this.log('loadWorkspace', '使用本地模拟数据（降级模式）');
     return {
       folders: mockFolders,
       tags: mockTags,
@@ -47,18 +92,34 @@ class DataService {
 
   /**
    * 异步触发后端扫描并持久化目录 (绝不阻塞 UI 渲染)
+   * 桌面模式 → Rust 后端扫描本地文件系统
+   * Web 模式 → 暂不支持本地扫描
    */
   async scanDirectory(dirPath: string): Promise<bridge.RustScanResult | null> {
-    return await bridge.scanLocalDirectoryViaRust(dirPath);
+    if (getEnvironment().isDesktop) {
+      this.log('scanDirectory', `扫描目录: ${dirPath}`);
+      return await bridge.scanLocalDirectoryViaRust(dirPath);
+    }
+    this.log('scanDirectory', 'Web 模式不支持本地文件扫描');
+    return null;
   }
 
   /**
    * 异步更新资产评分
    */
   async setAssetRating(id: string, rating: number): Promise<void> {
-    if (bridge.isTauriDesktop()) {
-      // 投递后台异步执行，不等待立即返回或并发处理
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
+      // 桌面模式：投递到 Rust 后端异步执行
       bridge.setAssetRatingViaRust(id, rating).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      // Web 模式：通过 API 更新
+      api.updateAssetRating(id, rating).catch(console.error);
+      return;
     }
   }
 
@@ -66,17 +127,26 @@ class DataService {
    * 异步更新资产收藏状态
    */
   async setAssetFavorite(id: string, favorite: boolean): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    if (getEnvironment().isDesktop) {
       bridge.setAssetFavoriteViaRust(id, favorite).catch(console.error);
     }
+    // Web 模式暂不支持收藏状态（PostgreSQL schema 无 rating/favorite 字段）
   }
 
   /**
    * 异步批量删除资产
    */
   async deleteAssets(ids: string[]): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.deleteAssetsViaRust(ids).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.batchDeleteAssets(ids).catch(console.error);
+      return;
     }
   }
 
@@ -84,8 +154,20 @@ class DataService {
    * 异步创建文件夹
    */
   async createFolder(folder: Folder): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.createFolderViaRust(folder).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.createFolder({
+        name: folder.name,
+        parentId: folder.parentId,
+        path: folder.path,
+      }).catch(console.error);
+      return;
     }
   }
 
@@ -93,18 +175,35 @@ class DataService {
    * 异步重命名文件夹
    */
   async renameFolder(id: string, newName: string): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.renameFolderViaRust(id, newName).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.updateFolder(id, { name: newName }).catch(console.error);
+      return;
     }
   }
 
   /**
-   * 异步更新文件夹详细属性 (包括置顶、排序、描述等)
+   * 异步更新文件夹详细属性
    */
   async updateFolder(idOrItem: string | Folder, updates?: Partial<Folder>): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       const folder = typeof idOrItem === 'string' ? { id: idOrItem, ...updates } as Folder : idOrItem;
       bridge.updateFolderViaRust(folder).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      const id = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
+      api.updateFolder(id, updates || {}).catch(console.error);
+      return;
     }
   }
 
@@ -112,8 +211,16 @@ class DataService {
    * 异步删除文件夹
    */
   async deleteFolder(id: string): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.deleteFolderViaRust(id).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.deleteFolder(id).catch(console.error);
+      return;
     }
   }
 
@@ -121,18 +228,35 @@ class DataService {
    * 异步创建标签
    */
   async createTag(tag: Tag): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.createTagViaRust(tag).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.createTag({ name: tag.name, color: tag.color }).catch(console.error);
+      return;
     }
   }
 
   /**
-   * 异步更新标签详细属性 (重命名、颜色、描述、置顶、排序)
+   * 异步更新标签详细属性
    */
   async updateTag(idOrItem: string | Tag, updates?: Partial<Tag>): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       const tag = typeof idOrItem === 'string' ? { id: idOrItem, ...updates } as Tag : idOrItem;
       bridge.updateTagViaRust(tag).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      const id = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
+      api.updateTag(id, updates || {}).catch(console.error);
+      return;
     }
   }
 
@@ -140,8 +264,16 @@ class DataService {
    * 异步删除标签
    */
   async deleteTag(id: string): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.deleteTagViaRust(id).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.deleteTag(id).catch(console.error);
+      return;
     }
   }
 
@@ -149,18 +281,35 @@ class DataService {
    * 异步创建集合
    */
   async createCollection(col: Collection): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.createCollectionViaRust(col).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.createCollection({ name: col.name }).catch(console.error);
+      return;
     }
   }
 
   /**
-   * 异步更新集合详细属性 (重命名、颜色、描述、置顶、排序)
+   * 异步更新集合详细属性
    */
   async updateCollection(idOrItem: string | Collection, updates?: Partial<Collection>): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       const col = typeof idOrItem === 'string' ? { id: idOrItem, ...updates } as Collection : idOrItem;
       bridge.updateCollectionViaRust(col).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      const id = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
+      api.updateCollection(id, { name: (updates?.name) || '' }).catch(console.error);
+      return;
     }
   }
 
@@ -168,8 +317,16 @@ class DataService {
    * 异步删除集合
    */
   async deleteCollection(id: string): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.deleteCollectionViaRust(id).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.deleteCollection(id).catch(console.error);
+      return;
     }
   }
 
@@ -177,8 +334,21 @@ class DataService {
    * 异步保存/更新智能文件夹
    */
   async saveSmartFolder(sf: SmartFolder): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.saveSmartFolderViaRust(sf).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.saveSmartFolder({
+        id: sf.id,
+        name: sf.name,
+        matchAll: sf.matchAll,
+        rulesJson: JSON.stringify(sf.rules || []),
+      }).catch(console.error);
+      return;
     }
   }
 
@@ -186,17 +356,23 @@ class DataService {
    * 异步更新智能文件夹详细属性
    */
   async updateSmartFolder(sf: SmartFolder): Promise<void> {
-    if (bridge.isTauriDesktop()) {
-      bridge.saveSmartFolderViaRust(sf).catch(console.error);
-    }
+    await this.saveSmartFolder(sf);
   }
 
   /**
    * 异步删除智能文件夹
    */
   async deleteSmartFolder(id: string): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
       bridge.deleteSmartFolderViaRust(id).catch(console.error);
+      return;
+    }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      api.deleteSmartFolder(id).catch(console.error);
+      return;
     }
   }
 
@@ -204,38 +380,63 @@ class DataService {
    * 在 Windows 资源管理器中定位文件
    */
   async openInExplorer(path: string): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    if (getEnvironment().isDesktop) {
       bridge.openInWindowsExplorer(path).catch(console.error);
+      return;
     }
+    this.log('openInExplorer', 'Web 模式不支持打开文件管理器');
   }
 
   /**
-   * 获取本地存储空间占用统计 (数据库、缩略图缓存等)
+   * 获取本地存储空间占用统计
    */
   async getStorageStats(): Promise<bridge.RustStorageStats> {
-    if (bridge.isTauriDesktop()) {
+    const env = getEnvironment();
+
+    if (env.isDesktop) {
+      this.log('getStorageStats', '从 Rust 后端获取存储统计');
       const stats = await bridge.getStorageStatsViaRust();
       if (stats) return stats;
+      // 降级返回默认值
+      return {
+        data_dir: 'C:\\Users\\User\\AppData\\Local\\AssetHub',
+        db_size_bytes: 2457600,
+        thumbnails_size_bytes: 8388608,
+        total_size_bytes: 10846208,
+        asset_count: 120,
+      };
     }
+
+    if (env.isRemoteWeb || env.isLocalWeb) {
+      this.log('getStorageStats', '从 Web API 获取存储统计');
+      const result = await api.getStorageStats();
+      if (result.success && result.data) {
+        return result.data;
+      }
+    }
+
+    // 降级：返回默认统计
     return {
-      data_dir: 'C:\\Users\\User\\AppData\\Local\\AssetHub',
-      db_size_bytes: 2457600, // 2.4 MB
-      thumbnails_size_bytes: 8388608, // 8 MB
-      total_size_bytes: 10846208,
-      asset_count: 120,
+      data_dir: 'PostgreSQL (Cloud)',
+      db_size_bytes: 0,
+      thumbnails_size_bytes: 0,
+      total_size_bytes: 0,
+      asset_count: 0,
     };
   }
 
   /**
-   * 完整数据迁移 (原子拷贝数据库与缩略图，更新配置)
+   * 完整数据迁移 (仅桌面模式支持)
    */
   async migrateDataStorage(newPath: string): Promise<string> {
-    if (bridge.isTauriDesktop()) {
+    if (getEnvironment().isDesktop) {
+      this.log('migrateDataStorage', `迁移数据到: ${newPath}`);
       const res = await bridge.migrateDataStorageViaRust(newPath);
       if (res) return res;
       throw new Error("Rust 后端迁移返回空响应");
     }
     // Web 预览环境模拟
+    this.log('migrateDataStorage', 'Web 模式模拟数据迁移');
     await new Promise(r => setTimeout(r, 1200));
     return `[模拟成功] 数据已迁移至 ${newPath}，应用将重启。`;
   }
@@ -244,7 +445,7 @@ class DataService {
    * 重启桌面客户端应用
    */
   async restartApplication(): Promise<void> {
-    if (bridge.isTauriDesktop()) {
+    if (getEnvironment().isDesktop) {
       await bridge.restartApplicationViaRust();
     } else {
       window.location.reload();
@@ -253,4 +454,3 @@ class DataService {
 }
 
 export const dataService = new DataService();
-

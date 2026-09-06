@@ -7,11 +7,10 @@
  */
 
 import { Asset, Folder, SmartFolder, Tag, Collection } from '../types';
+import { isTauriDesktop } from './environment';
 
-export function isTauriDesktop(): boolean {
-  if (typeof window === 'undefined') return false;
-  return '__TAURI__' in window || '__TAURI_INTERNALS__' in window;
-}
+// 重新导出 isTauriDesktop 以保持向后兼容（其他模块从 desktopBridge 导入）
+export { isTauriDesktop };
 
 /**
  * 弹出 Windows 原生文件夹选取窗口 (非阻塞异步)
