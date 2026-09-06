@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
-import { 
-  Search, Filter, Grid, List, Image as ImageIcon, Video, Box, FileText, 
+import { Search, Filter, Grid, List, Image as ImageIcon, Video, Box, FileText, 
   Folder as FolderIcon, FolderTree, AlertTriangle, ChevronUp, ChevronDown, 
-  Layers, Columns2, FolderPlus
+  Layers, Columns2, FolderPlus, Loader2
 } from 'lucide-react';
 import { cn, formatBytes } from '../lib/utils';
 import { Asset, AssetState, Folder, SortOption } from '../types';
 import { MonitoredSplitView } from './MonitoredSplitView';
+import { dataService } from '../services/dataService';
 
 interface MainAreaProps {
   state: AssetState;
@@ -56,6 +56,33 @@ export function MainArea({
   
   const [localSearch, setLocalSearch] = useState('');
   const [isSplitMonitoredView, setIsSplitMonitoredView] = useState(false);
+  
+  // 懒加载缩略图缓存：assetId → 可展示 URL
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  // 跟踪正在加载中的资产，避免重复请求
+  const [loadingThumbnails, setLoadingThumbnails] = useState<Set<string>>(new Set());
+
+  /**
+   * 懒加载资产缩略图：仅当 asset.thumbnailUrl 为空且未开始加载时触发
+   */
+  const ensureThumbnail = async (asset: Asset) => {
+    if (asset.thumbnailUrl || thumbnails[asset.id] || loadingThumbnails.has(asset.id)) return;
+    setLoadingThumbnails(prev => new Set(prev).add(asset.id));
+    try {
+      const url = await dataService.getAssetThumbnail(asset.id, asset.path);
+      if (url) {
+        setThumbnails(prev => ({ ...prev, [asset.id]: url }));
+      }
+    } catch (err) {
+      console.warn(`[MainArea] 缩略图生成失败: ${asset.path}`, err);
+    } finally {
+      setLoadingThumbnails(prev => {
+        const next = new Set(prev);
+        next.delete(asset.id);
+        return next;
+      });
+    }
+  };
 
   const handleAssetClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -300,7 +327,16 @@ export function MainArea({
                             isAssetSelected ? "bg-blue-500/10 border-blue-500/30" : "hover:bg-white/5"
                           )}
                         >
-                          <div className="w-8 flex justify-center shrink-0">{getAssetIcon(asset.type)}</div>
+                          <div className="w-8 h-8 flex items-center justify-center shrink-0 rounded overflow-hidden bg-[#111]">
+                            {(() => {
+                              const thumbUrl = asset.thumbnailUrl || thumbnails[asset.id];
+                              if (thumbUrl) {
+                                return <img src={thumbUrl} alt="" className="w-full h-full object-cover" />;
+                              }
+                              ensureThumbnail(asset);
+                              return getAssetIcon(asset.type);
+                            })()}
+                          </div>
                           <div className="flex-1 truncate text-sm text-neutral-200">{asset.name}</div>
                           <div className="w-24 text-right text-xs text-neutral-500 shrink-0">{formatBytes(asset.size)}</div>
                           <div className="w-32 text-right text-xs text-neutral-500 truncate shrink-0">{asset.dateModified.split('T')[0]}</div>
@@ -327,18 +363,31 @@ export function MainArea({
                             {asset.type}
                           </div>
 
-                          {asset.thumbnailUrl ? (
-                            <img 
-                              src={asset.thumbnailUrl} 
-                              alt={asset.name} 
-                              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div className="transform transition-transform duration-300 group-hover:scale-110">
-                              {getAssetIcon(asset.type)}
-                            </div>
-                          )}
+                          {/* 缩略图懒加载：优先使用 asset.thumbnailUrl（数据库缓存），
+                              未命中时调用 ensureThumbnail 触发 Rust 后端生成 */}
+                          {(() => {
+                            const thumbUrl = asset.thumbnailUrl || thumbnails[asset.id];
+                            if (thumbUrl) {
+                              return (
+                                <img 
+                                  src={thumbUrl} 
+                                  alt={asset.name} 
+                                  className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                                  loading="lazy"
+                                />
+                              );
+                            }
+                            // 异步触发懒加载（非阻塞），由 ensureThumbnail 内部防重
+                            ensureThumbnail(asset);
+                            return (
+                              <div className="transform transition-transform duration-300 group-hover:scale-110">
+                                {loadingThumbnails.has(asset.id)
+                                  ? <Loader2 size={24} className="animate-spin text-neutral-500" />
+                                  : getAssetIcon(asset.type)
+                                }
+                              </div>
+                            );
+                          })()}
                           
                           {/* Bottom Left Tags */}
                           {asset.tags.length > 0 && (

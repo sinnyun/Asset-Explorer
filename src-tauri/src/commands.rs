@@ -207,13 +207,17 @@ pub async fn get_file_metadata(path: String) -> Result<serde_json::Value, String
     .map_err(|e| e.to_string())?
 }
 
-/// 指令 18: 生成或获取图片缩略图
+/// 指令 18: 生成或获取图片缩略图，生成后自动保存缩略图路径到数据库
 #[tauri::command]
-pub async fn get_thumbnail(path: String, max_dimension: u32) -> Result<String, String> {
+pub async fn get_thumbnail(db: State<'_, Database>, asset_id: String, path: String, max_dimension: u32) -> Result<String, String> {
+    let db = db.inner().clone();
     tokio::task::spawn_blocking(move || {
         let p = Path::new(&path);
         let thumb_path = generate_or_get_thumbnail(p, max_dimension)?;
-        Ok(thumb_path.to_string_lossy().to_string())
+        let thumb_str = thumb_path.to_string_lossy().to_string();
+        // 将缩略图路径持久化到数据库，下次直接从 asset.thumbnailUrl 读取
+        db.update_asset_thumbnail_url(&asset_id, &thumb_str)?;
+        Ok(thumb_str)
     })
     .await
     .map_err(|e| e.to_string())?

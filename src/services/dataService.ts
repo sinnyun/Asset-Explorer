@@ -198,6 +198,29 @@ class DataService {
   }
 
   /**
+   * 懒加载生成资产缩略图（桌面模式）
+   * 调用 Rust 后端生成缩略图并保存到数据库缓存，
+   * 返回的本地路径需通过 convertFileSrc 转为可展示 URL
+   */
+  async getAssetThumbnail(assetId: string, path: string): Promise<string | null> {
+    if (getEnvironment().isDesktop) {
+      this.log('getAssetThumbnail', `生成缩略图: ${path}`);
+      const thumbPath = await bridge.getThumbnailViaRust(assetId, path);
+      if (thumbPath) {
+        // 尝试使用 Tauri 的 convertFileSrc 将本地路径转换为可展示 URL
+        try {
+          const { convertFileSrc } = await import('@tauri-apps/api/core');
+          return convertFileSrc(thumbPath);
+        } catch {
+          // 如果 convertFileSrc 不可用（如 Vite HMR 未就绪），直接返回本地路径
+          return thumbPath;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * 异步更新资产收藏状态
    */
   async setAssetFavorite(id: string, favorite: boolean): Promise<void> {

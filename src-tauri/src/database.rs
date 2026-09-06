@@ -433,6 +433,17 @@ impl Database {
         Ok(())
     }
 
+    /// 更新资产缩略图 URL（懒加载生成后保存）
+    pub fn update_asset_thumbnail_url(&self, id: &str, thumbnail_url: &str) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE assets SET thumbnail_url = ?1 WHERE id = ?2",
+            params![thumbnail_url, id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// 更新资产评分与收藏状态
     pub fn set_asset_rating(&self, id: &str, rating: u8) -> Result<(), String> {
         let conn = self.conn.lock();

@@ -105,6 +105,17 @@ export async function deleteAssetsViaRust(ids: string[]): Promise<boolean> {
   return res !== null;
 }
 
+/**
+ * 懒加载生成资产缩略图，并自动保存到数据库
+ * @param assetId 资产 ID
+ * @param path 资产源文件路径
+ * @param maxDimension 缩略图最大尺寸（默认 256px）
+ * @returns 缩略图本地文件路径，前端需通过 convertFileSrc 转换为可展示 URL
+ */
+export async function getThumbnailViaRust(assetId: string, path: string, maxDimension = 256): Promise<string | null> {
+  return await callTauri<string>('get_thumbnail', { assetId, path, maxDimension });
+}
+
 export async function createFolderViaRust(folder: Folder): Promise<boolean> {
   const res = await callTauri<void>('create_folder', { folder });
   return res !== null;
