@@ -55,12 +55,30 @@ class DataService {
           }
           if (payload.folders.length > 0 || payload.assets.length > 0) {
             this.log('loadWorkspace', `成功加载 ${payload.assets.length} 个资产`);
+
+            // 标准化数据：Rust 后端的 Folder 没有 tags/collections 字段，
+            // 而前端 TypeScript 类型要求这两个字段必填，补充默认空数组
+            const normalizeFolders = (folders: any[]) =>
+              folders.map(f => ({
+                ...f,
+                tags: f.tags ?? [],
+                collections: f.collections ?? [],
+              }));
+
+            // 标准化资产：同理确保 tags/collections 不为 undefined
+            const normalizeAssets = (assetsList: any[]) =>
+              assetsList.map(a => ({
+                ...a,
+                tags: a.tags ?? [],
+                collections: a.collections ?? [],
+              }));
+
             return {
-              folders: payload.folders,
+              folders: normalizeFolders(payload.folders),
               tags: payload.tags,
               collections: payload.collections,
               customSmartFolders: payload.smart_folders,
-              assets: payload.assets,
+              assets: normalizeAssets(payload.assets),
             };
           }
           // 数据库为空（首次启动），空数据库也是有效状态，直接返回空数据
