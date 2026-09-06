@@ -51,6 +51,18 @@ export default function App() {
       if (loaded) {
         setState(prev => ({ ...prev, ...loaded }));
       }
+      // 加载完成后，校验资产有效性：删除数据库中文件已不存在的资产记录
+      // 这包括清理之前开发/测试阶段写入的 C:/Workspace 等模拟数据路径
+      // 校验结果会打印到控制台：检查了多少个资产，清理了多少个无效路径
+      dataService.validateAssets().then(() => {
+        // 校验完成后，重新加载工作区数据（清理后状态已更新）
+        dataService.loadWorkspace().then(reloaded => {
+          if (reloaded) {
+            console.log(`[App] 资产校验后重新加载: ${reloaded.assets.length} 个资产`);
+            setState(prev => ({ ...prev, ...reloaded }));
+          }
+        });
+      });
     });
   }, []);
 
@@ -695,14 +707,14 @@ export default function App() {
           label: '刷新数据',
           icon: <RefreshCw size={14} />,
           onClick: () => {
-            dataService.loadAllData().then(d => {
+            dataService.loadWorkspace().then(d => {
               if (d) {
                 setState(prev => ({
                   ...prev,
-                  folders: d.folders,
-                  assets: d.assets,
-                  tags: d.tags,
-                  collections: d.collections,
+                  folders: d.folders || [],
+                  assets: d.assets || [],
+                  tags: d.tags || [],
+                  collections: d.collections || [],
                   customSmartFolders: d.customSmartFolders || []
                 }));
               }

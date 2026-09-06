@@ -217,9 +217,24 @@ class DataService {
    * 懒加载生成资产缩略图（桌面模式）
    * 调用 Rust 后端生成缩略图并保存到数据库缓存，
    * 通过 Rust 命令读取文件并以 base64 data URL 返回（绕过浏览器 file:// 安全限制）
+   *
+   * @param assetId 资产 ID
+   * @param path 资产源文件路径（用于生成缩略图）
+   * @param existingThumbnailUrl 可选的已有缩略图路径（若提供，则直接读取 base64，不重新生成）
    */
-  async getAssetThumbnail(assetId: string, path: string): Promise<string | null> {
+  async getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
     if (getEnvironment().isDesktop) {
+      // 场景 1：缩略图已缓存到数据库（thumbnailUrl 已存在）
+      // 直接读取缓存文件并返回 base64 data URL，避免重新生成
+      if (existingThumbnailUrl) {
+        this.log('getAssetThumbnail', `读取已有缩略图缓存: ${existingThumbnailUrl}`);
+        const dataUrl = await bridge.readThumbnailBase64(existingThumbnailUrl);
+        if (dataUrl) return dataUrl;
+        // 缓存文件读取失败（如文件被删除），降级到重新生成
+        this.log('getAssetThumbnail', `缩略图缓存文件不存在，重新生成`);
+      }
+
+      // 场景 2：无缩略图缓存，调用 Rust 后端从源文件生成
       this.log('getAssetThumbnail', `生成缩略图: ${path}`);
       const thumbPath = await bridge.getThumbnailViaRust(assetId, path);
       if (thumbPath) {
@@ -236,6 +251,25 @@ class DataService {
       }
     }
     return null;
+  }
+
+  /**
+   * 异步校验资产有效性：删除数据库中文件已不存在的资产记录
+   * 桌面模式下调用 Rust 后端 SQLite 校验，返回清理结果
+   * 此方法在 loadWorkspace 加载完成后调用，确保前端不会展示无效路径
+   * 校验结果（清理了哪些无效路径）会通过日志输出到控制台
+   */
+  async validateAssets(): Promise<void> {
+    if (getEnvironment().isDesktop) {
+      const result = await bridge.validateAssetsViaRust();
+      if (result) {
+        if (result.deleted_count > 0) {
+          console.log(`[DataService] 资产有效性校验完成: 检查 ${result.total_checked} 个资产, 清理了 ${result.deleted_count} 个无效路径（如 C:/Workspace 等模拟数据）`);
+        } else {
+          console.log(`[DataService] 资产有效性校验完成: 检查 ${result.total_checked} 个资产, 全部有效`);
+        }
+      }
+    }
   }
 
   /**

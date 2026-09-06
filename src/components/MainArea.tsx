@@ -22,6 +22,7 @@ interface MainAreaProps {
   onSearchSubmit: (query: string) => void;
   onContextMenuAsset: (e: React.MouseEvent, id: string) => void;
   onContextMenuFolder: (e: React.MouseEvent, id: string) => void;
+  onContextMenuCanvas?: (e: React.MouseEvent) => void;
   onSelectFolder?: (id: string) => void;
   onAddMonitoredFolder?: () => void;
 }
@@ -50,6 +51,7 @@ export function MainArea({
   onSearchSubmit,
   onContextMenuAsset,
   onContextMenuFolder,
+  onContextMenuCanvas,
   onSelectFolder,
   onAddMonitoredFolder
 }: MainAreaProps) {
@@ -65,13 +67,22 @@ export function MainArea({
   const [failedThumbnails, setFailedThumbnails] = useState<Set<string>>(new Set());
 
   /**
-   * 懒加载资产缩略图：仅当 asset.thumbnailUrl 为空且未开始加载且未失败过时触发
+   * 懒加载资产缩略图：确保通过 base64 data URL 展示（绕过浏览器 file:// 安全限制）
+   *
+   * 流程说明：
+   * - 若 asset.thumbnailUrl 已存在（数据库缓存），直接读取缓存文件并返回 base64 data URL
+   * - 若无缓存，调用 Rust 后端从源文件生成缩略图并保存到数据库
+   * - 无论哪种情况，最终都通过 readThumbnailBase64 IPC 返回 base64 字符串，
+   *   绝不使用原始文件路径作为 <img src>，避免浏览器安全拦截
    */
   const ensureThumbnail = async (asset: Asset) => {
-    if (asset.thumbnailUrl || thumbnails[asset.id] || loadingThumbnails.has(asset.id) || failedThumbnails.has(asset.id)) return;
+    // 如果已经加载过（成功或失败），不再重复请求
+    if (thumbnails[asset.id] || loadingThumbnails.has(asset.id) || failedThumbnails.has(asset.id)) return;
     setLoadingThumbnails(prev => new Set(prev).add(asset.id));
     try {
-      const url = await dataService.getAssetThumbnail(asset.id, asset.path);
+      // 传递 asset.thumbnailUrl（数据库缓存的缩略图路径），
+      // dataService.getAssetThumbnail 会优先读取缓存文件并返回 base64 data URL
+      const url = await dataService.getAssetThumbnail(asset.id, asset.path, asset.thumbnailUrl);
       if (url) {
         setThumbnails(prev => ({ ...prev, [asset.id]: url }));
       } else {
@@ -252,7 +263,7 @@ export function MainArea({
         />
       ) : (
         /* Asset Canvas */
-        <div className="flex-1 overflow-y-scroll p-6 custom-scrollbar relative">
+        <div className="flex-1 overflow-y-scroll p-6 custom-scrollbar relative" onContextMenu={(e) => onContextMenuCanvas?.(e)}>
         {isTruncated && (
           <div className="mb-6 flex items-start gap-3 bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg text-amber-400 text-sm">
             <AlertTriangle size={18} className="shrink-0 mt-0.5" />

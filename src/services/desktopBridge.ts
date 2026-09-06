@@ -222,3 +222,11 @@ export async function restartApplicationViaRust(): Promise<void> {
   await callTauri<void>('restart_application');
 }
 
+/**
+ * 校验资产有效性：删除数据库中文件已不存在的资产记录
+ * 返回 { deleted_count, total_checked }
+ */
+export async function validateAssetsViaRust(): Promise<{ deleted_count: number; total_checked: number } | null> {
+  return await callTauri<{ deleted_count: number; total_checked: number }>('validate_assets');
+}
+

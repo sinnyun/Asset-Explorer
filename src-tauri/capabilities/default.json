@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力集：主窗口 IPC 命令权限，包括事件监听和文件系统操作",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "shell:allow-open",
+    "dialog:default",
+    "fs:default"
+  ]
+}
