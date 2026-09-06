@@ -64,18 +64,23 @@ export const mockAssets: Asset[] = [];
 for (let i = 0; i < 2000; i++) {
   const f = mockFolders[Math.floor(Math.random() * mockFolders.length)];
   const type = Math.random() > 0.6 ? 'image' : (Math.random() > 0.5 ? 'video' : 'model');
+  const isImg = type === 'image';
+  const isVid = type === 'video';
   mockAssets.push({
     id: `a_${i}`,
-    name: `Asset_File_${i}_${type}.png`,
+    name: isImg ? `Asset_File_${i}_image.png` : isVid ? `Asset_File_${i}_video.mp4` : `Asset_File_${i}_model.fbx`,
     type: type,
     size: Math.floor(Math.random() * 10000000),
     dateModified: new Date(Date.now() - Math.random() * 10000000000).toISOString(),
     dateAdded: new Date().toISOString(),
-    path: `${f.path}/Asset_File_${i}.png`,
+    path: isImg ? `${f.path}/Asset_File_${i}_image.png` : isVid ? `${f.path}/Asset_File_${i}_video.mp4` : `${f.path}/Asset_File_${i}_model.fbx`,
     folderId: f.id,
     tags: [mockTags[Math.floor(Math.random() * mockTags.length)].id],
     collections: Math.random() > 0.7 ? [mockCollections[Math.floor(Math.random() * mockCollections.length)].id] : [],
-    thumbnailUrl: type === 'image' ? `https://picsum.photos/seed/${i}/200/200` : undefined,
+    thumbnailUrl: isImg ? `https://picsum.photos/seed/${i}/200/200` : undefined,
+    width: isImg || isVid ? Math.floor(Math.random() * 1920) + 640 : undefined,
+    height: isImg || isVid ? Math.floor(Math.random() * 1080) + 480 : undefined,
+    fileHash: Math.random().toString(16).substring(2) + Math.random().toString(16).substring(2),
   });
 }
 
