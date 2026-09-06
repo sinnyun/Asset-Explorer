@@ -78,8 +78,8 @@ fn extract_via_image_crate(source_path: &Path, max_dimension: u32, target_cache_
 mod windows_impl {
     use super::*;
     use std::path::Path;
-    use windows::core::{Interface, PCWSTR};
-    use windows::Win32::Foundation::{HWND, SIZE};
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::{
         DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, HBITMAP, BITMAP, BITMAPINFO,
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -100,7 +100,7 @@ mod windows_impl {
     ) -> Result<PathBuf, String> {
         unsafe {
             // 初始化 COM 库
-            let _ = CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED);
+            let _ = CoInitializeEx(Some(std::ptr::null()), COINIT_MULTITHREADED);
 
             // 将 Rust Path 转换为 Windows wide string
             let wide_path: Vec<u16> = source_path
@@ -146,7 +146,7 @@ mod windows_impl {
 
             // 将 HBITMAP 转换为 PNG 并保存
             let save_res = convert_hbitmap_to_png(hbitmap, target_cache_path);
-            let _ = DeleteObject(hbitmap);
+            let _ = DeleteObject(hbitmap.into());
 
             save_res.map(|_| target_cache_path.to_path_buf())
         }
@@ -156,9 +156,9 @@ mod windows_impl {
     unsafe fn convert_hbitmap_to_png(hbm: HBITMAP, out_path: &Path) -> Result<(), String> {
         let mut bm: BITMAP = std::mem::zeroed();
         let get_bm_res = GetObjectW(
-            hbm,
+            hbm.into(),
             std::mem::size_of::<BITMAP>() as i32,
-            &mut bm as *mut _ as *mut std::ffi::c_void,
+            Some(&mut bm as *mut _ as *mut std::ffi::c_void),
         );
 
         if get_bm_res == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
@@ -177,18 +177,18 @@ mod windows_impl {
         bi.bmiHeader.biCompression = BI_RGB.0;
 
         let mut buffer: Vec<u8> = vec![0u8; (width * height * 4) as usize];
-        let hdc = GetDC(HWND(0));
+        let hdc = GetDC(None);
 
         let lines = GetDIBits(
             hdc,
             hbm,
             0,
             height,
-            buffer.as_mut_ptr() as *mut _,
+            Some(buffer.as_mut_ptr() as *mut _),
             &mut bi,
             DIB_RGB_COLORS,
         );
-        let _ = ReleaseDC(HWND(0), hdc);
+        let _ = ReleaseDC(None, hdc);
 
         if lines == 0 {
             return Err("GetDIBits 拷贝位图内存失败".to_string());
