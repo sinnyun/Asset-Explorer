@@ -47,6 +47,12 @@ class DataService {
     return await apiClient.scanDirectory(dirPath);
   }
 
+  /** 后台增量扫描本地目录（事件流推送进度与增量资产），命令立即返回 */
+  async startScanDirectory(dirPath: string): Promise<void> {
+    this.log('startScanDirectory', `后台增量扫描目录: ${dirPath}`);
+    return await apiClient.startScanDirectory(dirPath);
+  }
+
   /** 懒加载生成资产缩略图 */
   async getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
     return await apiClient.getAssetThumbnail(assetId, path, existingThumbnailUrl);

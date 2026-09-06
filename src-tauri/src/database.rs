@@ -477,6 +477,60 @@ impl Database {
         Ok(())
     }
 
+    /// 仅批量写入资产（UPSERT 保留已有关联）。
+    /// 供增量扫描的分批阶段使用——文件夹已在「扫描开始」阶段由 batch_save_scan_results
+    /// 一次性写入，此处只负责资产本身，避免每批都重复插入整棵目录树。
+    pub fn batch_save_assets(&self, assets: &[Asset]) -> Result<(), String> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO assets (
+                    id, name, path, asset_type, size, folder_id, date_modified, date_added,
+                    rating, favorite, color, width, height, file_hash, thumbnail_url
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    path = excluded.path,
+                    asset_type = excluded.asset_type,
+                    size = excluded.size,
+                    folder_id = excluded.folder_id,
+                    date_modified = excluded.date_modified,
+                    date_added = excluded.date_added,
+                    rating = excluded.rating,
+                    favorite = excluded.favorite,
+                    color = excluded.color,
+                    width = excluded.width,
+                    height = excluded.height,
+                    file_hash = excluded.file_hash,
+                    thumbnail_url = excluded.thumbnail_url",
+            ).map_err(|e| e.to_string())?;
+
+            for a in assets {
+                stmt.execute(params![
+                    a.id,
+                    a.name,
+                    a.path,
+                    a.asset_type,
+                    a.size as i64,
+                    a.folder_id,
+                    a.date_modified,
+                    a.date_added,
+                    a.rating as i32,
+                    a.favorite as i32,
+                    a.color,
+                    a.width,
+                    a.height,
+                    a.file_hash,
+                    a.thumbnail_url
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // =========================================================================
     // 批量关联加载工具（解决 N+1 查询问题）
     //

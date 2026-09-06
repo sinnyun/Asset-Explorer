@@ -101,6 +101,9 @@ export const apiClient: ApiProvider = {
   scanDirectory(path: string): Promise<ScanResult | null> {
     return getProvider().scanDirectory(path);
   },
+  startScanDirectory(path: string): Promise<void> {
+    return getProvider().startScanDirectory(path);
+  },
   getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
     return getProvider().getAssetThumbnail(assetId, path, existingThumbnailUrl);
   },

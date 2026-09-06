@@ -54,6 +54,9 @@ export interface ApiProvider {
   /** 扫描本地目录并返回结果 */
   scanDirectory(path: string): Promise<ScanResult | null>;
 
+  /** 后台增量扫描本地目录（通过事件流推送进度与增量资产），命令立即返回 */
+  startScanDirectory(path: string): Promise<void>;
+
   /** 懒加载获取资产缩略图（base64 data URL） */
   getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null>;
 
