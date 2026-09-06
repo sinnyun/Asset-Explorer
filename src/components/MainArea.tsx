@@ -25,6 +25,7 @@ interface MainAreaProps {
   onContextMenuCanvas?: (e: React.MouseEvent) => void;
   onSelectFolder?: (id: string) => void;
   onAddMonitoredFolder?: () => void;
+  onPreviewAsset?: (asset: Asset) => void;
 }
 
 // Utility to cleanly format deep paths
@@ -53,7 +54,8 @@ export function MainArea({
   onContextMenuFolder,
   onContextMenuCanvas,
   onSelectFolder,
-  onAddMonitoredFolder
+  onAddMonitoredFolder,
+  onPreviewAsset
 }: MainAreaProps) {
   
   const [localSearch, setLocalSearch] = useState('');
@@ -109,6 +111,10 @@ export function MainArea({
   const handleFolderClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     onToggleSelection(id, 'folder', e.ctrlKey || e.metaKey);
+  };
+
+  const handleAssetDoubleClick = (asset: Asset) => {
+    if (onPreviewAsset) onPreviewAsset(asset);
   };
 
   const getAssetIcon = (type: string) => {
@@ -260,6 +266,7 @@ export function MainArea({
           onContextMenuAsset={onContextMenuAsset}
           onContextMenuFolder={onContextMenuFolder}
           onSelectFolder={(id) => onSelectFolder?.(id)}
+          onPreviewAsset={onPreviewAsset}
         />
       ) : (
         /* Asset Canvas */
@@ -339,6 +346,7 @@ export function MainArea({
                           key={asset.id}
                           onClick={(e) => handleAssetClick(e, asset.id)}
                           onContextMenu={(e) => onContextMenuAsset(e, asset.id)}
+                          onDoubleClick={() => handleAssetDoubleClick(asset)}
                           className={cn(
                             "flex items-center gap-4 px-3 py-2 rounded-md cursor-pointer transition-colors border border-transparent",
                             isAssetSelected ? "bg-blue-500/10 border-blue-500/30" : "hover:bg-white/5"
@@ -367,6 +375,7 @@ export function MainArea({
                         key={asset.id}
                         onClick={(e) => handleAssetClick(e, asset.id)}
                         onContextMenu={(e) => onContextMenuAsset(e, asset.id)}
+                        onDoubleClick={() => handleAssetDoubleClick(asset)}
                         className={cn(
                           "group relative rounded-lg overflow-hidden border cursor-pointer transition-all duration-200 bg-[#1e1e1e] flex flex-col",
                           isAssetSelected 
