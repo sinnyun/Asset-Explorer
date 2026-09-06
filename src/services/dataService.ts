@@ -57,10 +57,12 @@ class DataService {
             this.log('loadWorkspace', `成功加载 ${payload.assets.length} 个资产`);
 
             // 标准化数据：Rust 后端的 Folder 没有 tags/collections 字段，
-            // 而前端 TypeScript 类型要求这两个字段必填，补充默认空数组
+            // 且 parentId 为 null 时前端无法匹配 parentId === undefined，
+            // 统一转换为 undefined 确保文件夹树正确渲染
             const normalizeFolders = (folders: any[]) =>
               folders.map(f => ({
                 ...f,
+                parentId: f.parentId ?? undefined,
                 tags: f.tags ?? [],
                 collections: f.collections ?? [],
               }));
@@ -145,7 +147,32 @@ class DataService {
   async scanDirectory(dirPath: string): Promise<bridge.RustScanResult | null> {
     if (getEnvironment().isDesktop) {
       this.log('scanDirectory', `扫描目录: ${dirPath}`);
-      return await bridge.scanLocalDirectoryViaRust(dirPath);
+      const raw = await bridge.scanLocalDirectoryViaRust(dirPath);
+      if (!raw) return null;
+
+      // 标准化 Rust 返回的文件夹树：parentId 为 null 时转 undefined，
+      // 避免前端 f.parentId === undefined 过滤失败导致文件夹树不显示
+      const normalizeFolder = (f: any) => ({
+        ...f,
+        parentId: f.parentId ?? undefined,
+        tags: f.tags ?? [],
+        collections: f.collections ?? [],
+      });
+
+      // 标准化资产：确保 tags/collections 不为 undefined
+      const normalizeAsset = (a: any) => ({
+        ...a,
+        tags: a.tags ?? [],
+        collections: a.collections ?? [],
+      });
+
+      return {
+        root_folder: normalizeFolder(raw.root_folder),
+        sub_folders: raw.sub_folders.map(normalizeFolder),
+        assets: raw.assets.map(normalizeAsset),
+        total_files_scanned: raw.total_files_scanned,
+        total_duration_ms: raw.total_duration_ms,
+      };
     }
     this.log('scanDirectory', 'Web 模式不支持本地文件扫描');
     return null;
