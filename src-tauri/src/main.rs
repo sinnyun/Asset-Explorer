@@ -112,7 +112,8 @@ fn main() {
             migrate_data_storage,
             restart_application,
             validate_assets,
-            read_thumbnail_base64
+            read_thumbnail_base64,
+            read_file_base64
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 桌面客户端失败");
