@@ -289,3 +289,19 @@ pub fn restart_application(app_handle: tauri::AppHandle) {
     println!("[Lifecycle] 收到应用重启指令，正在安全重启...");
     app_handle.restart();
 }
+
+/// 指令 24: 启动时校验资产有效性（删除数据库中文件已不存在的资产记录）
+#[derive(Serialize)]
+pub struct ValidationResult {
+    pub deleted_count: usize,
+    pub total_checked: usize,
+}
+
+#[tauri::command]
+pub fn validate_assets(db: State<'_, Database>) -> Result<ValidationResult, String> {
+    let (total, deleted) = db.validate_assets()?;
+    Ok(ValidationResult {
+        deleted_count: deleted,
+        total_checked: total,
+    })
+}

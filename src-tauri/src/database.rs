@@ -512,6 +512,105 @@ impl Database {
         Ok(folders)
     }
 
+    /// 获取所有已监控的文件夹（用于启动时自动挂载文件监听器）
+    pub fn get_monitored_folders(&self) -> Result<Vec<Folder>, String> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, name, path, parent_id, is_monitored FROM folders WHERE is_monitored = 1 ORDER BY name ASC")
+            .map_err(|e| e.to_string())?;
+
+        let iter = stmt
+            .query_map([], |row| {
+                Ok(Folder {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    is_monitored: row.get::<_, i32>(4)? != 0,
+                    asset_count: None,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut folders = Vec::new();
+        for f in iter.flatten() {
+            folders.push(f);
+        }
+        Ok(folders)
+    }
+
+    /// 按路径批量删除资产（用于文件监控检测到删除时）
+    pub fn delete_assets_by_paths(&self, paths: &[String]) -> Result<usize, String> {
+        let conn = self.conn.lock();
+        let mut count = 0usize;
+        for path in paths {
+            let affected = conn
+                .execute("DELETE FROM assets WHERE path = ?1", params![path])
+                .map_err(|e| e.to_string())?;
+            count += affected;
+        }
+        Ok(count)
+    }
+
+    /// 启动时校验资产有效性：删除数据库中文件已不存在的资产记录
+    pub fn validate_assets(&self) -> Result<(usize, usize), String> {
+        let assets = self.get_all_assets()?;
+        let total = assets.len();
+        let mut paths_to_delete: Vec<String> = Vec::new();
+
+        for asset in &assets {
+            let path = std::path::Path::new(&asset.path);
+            if !path.exists() {
+                paths_to_delete.push(asset.path.clone());
+            }
+        }
+
+        let deleted = self.delete_assets_by_paths(&paths_to_delete)?;
+        println!("[Validation] 启动资产校验: 共检查 {} 个资产, 删除 {} 个无效路径", total, deleted);
+        Ok((total, deleted))
+    }
+
+    /// 按路径查询资产（判断文件是否已在数据库中）
+    pub fn get_asset_by_path(&self, path: &str) -> Result<Option<Asset>, String> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, path, asset_type, size, folder_id, date_modified, date_added,
+                        rating, favorite, color, width, height, file_hash, thumbnail_url
+                 FROM assets WHERE path = ?1 LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut rows = stmt
+            .query_map(params![path], |row| {
+                Ok(Asset {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    asset_type: row.get(3)?,
+                    size: row.get::<_, i64>(4)? as u64,
+                    folder_id: row.get(5)?,
+                    date_modified: row.get(6)?,
+                    date_added: row.get(7)?,
+                    rating: row.get::<_, i32>(8)? as u8,
+                    favorite: row.get::<_, i32>(9)? != 0,
+                    color: row.get(10)?,
+                    width: row.get(11)?,
+                    height: row.get(12)?,
+                    file_hash: row.get(13)?,
+                    thumbnail_url: row.get(14)?,
+                    tags: Vec::new(),
+                    collections: Vec::new(),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        match rows.next() {
+            Some(Ok(asset)) => Ok(Some(asset)),
+            _ => Ok(None),
+        }
+    }
+
     pub fn insert_folder(&self, folder: &Folder) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(

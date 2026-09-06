@@ -12,6 +12,7 @@ mod watcher;
 
 use commands::*;
 use database::Database;
+use std::sync::Arc;
 
 fn main() {
     // ========================================================================
@@ -49,13 +50,37 @@ fn main() {
         Database::init_in_memory().expect("初始化数据库失败")
     });
 
+    // 克隆一份用于 setup 闭包，避免 move 后 on_window_event 无法使用
+    let db_for_setup = db.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(db.clone())
         // ====================================================================
-        // 机制 2：完善完整的界面退出机制
+        // 机制 2：启动时自动校验资产有效性并挂载文件监听器
+        // ====================================================================
+        .setup(move |app| {
+            // 启动时自动校验：删除数据库中文件已不存在的资产记录
+            match db_for_setup.validate_assets() {
+                Ok((total, deleted)) => {
+                    if deleted > 0 {
+                        println!("[Startup] 启动校验完成: 检查 {} 个资产, 清理了 {} 个无效路径", total, deleted);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[Startup] 启动资产校验失败: {}", e);
+                }
+            }
+
+            // 启动文件监控器，监听已监控文件夹的变更
+            let app_handle = app.handle().clone();
+            watcher::start_file_watcher(app_handle, Arc::new(db_for_setup.clone()));
+            Ok(())
+        })
+        // ====================================================================
+        // 机制 3：完善完整的界面退出机制
         // 关闭主窗口时，主动刷新数据库事务 WAL 检查点，并退出整个应用进程，
         // 彻底终结所有后台 Tokio/Rayon/Notify 监听线程，坚决避免僵尸进程！
         // ====================================================================
@@ -90,7 +115,8 @@ fn main() {
             get_system_info,
             get_storage_stats,
             migrate_data_storage,
-            restart_application
+            restart_application,
+            validate_assets
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 桌面客户端失败");
