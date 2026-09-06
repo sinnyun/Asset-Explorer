@@ -213,7 +213,9 @@ pub async fn get_thumbnail(db: State<'_, Database>, asset_id: String, path: Stri
     let db = db.inner().clone();
     tokio::task::spawn_blocking(move || {
         let p = Path::new(&path);
-        let thumb_path = generate_or_get_thumbnail(p, max_dimension)?;
+        // 使用数据库的 data_dir 作为缩略图缓存根目录（与数据库同目录下的 thumbnails/）
+        let data_dir = db.get_data_dir().to_path_buf();
+        let thumb_path = generate_or_get_thumbnail(p, max_dimension, &data_dir)?;
         let thumb_str = thumb_path.to_string_lossy().to_string();
         // 将缩略图路径持久化到数据库，下次直接从 asset.thumbnailUrl 读取
         db.update_asset_thumbnail_url(&asset_id, &thumb_str)?;

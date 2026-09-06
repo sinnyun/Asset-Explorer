@@ -109,6 +109,11 @@ impl Database {
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
+    /// 获取当前数据目录路径（缩略图、配置等均与此目录关联）
+    pub fn get_data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// 获取存储占用统计信息
     pub fn get_storage_stats(&self) -> StorageStats {
         let db_file = self.data_dir.join("assethub.db");

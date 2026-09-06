@@ -5,37 +5,38 @@
 //! 2. 若系统缓存不存在，自动调用 Windows Shell 提取器 (IShellItemImageFactory) 提取生成
 //! 3. 跨平台/格式兜底：调用 Rust `image` 开源库解码缩放
 //! 4. 自动持久化在本地缓存目录，避免重复调用
+//! 注意：缓存目录跟随用户的 data_dir 配置（与数据库同目录下的 thumbnails/ 子目录），
+//!       而非固定系统路径，确保数据迁移后缩略图也随同迁移。
 //! ============================================================================
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
-/// 获取全局缩略图本地缓存目录 (默认 Windows 对应 %LOCALAPPDATA%\AssetHub\thumbnails)
-pub fn get_cache_dir() -> PathBuf {
-    let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("./.data"));
-    dir.push("AssetHub");
-    dir.push("thumbnails");
+/// 获取缩略图本地缓存目录 (路径为 {data_dir}/thumbnails/)
+pub fn get_cache_dir(data_dir: &Path) -> PathBuf {
+    let dir = data_dir.join("thumbnails");
     let _ = fs::create_dir_all(&dir);
     dir
 }
 
 /// 计算缓存唯一文件路径 (根据文件源路径哈希与目标尺寸)
-pub fn get_cache_file_path(source_path: &Path, max_dimension: u32) -> PathBuf {
+pub fn get_cache_file_path(source_path: &Path, max_dimension: u32, data_dir: &Path) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(source_path.to_string_lossy().as_bytes());
     let hash_hex = hex::encode(hasher.finalize());
     let filename = format!("{}_{}px.png", &hash_hex[..16], max_dimension);
-    get_cache_dir().join(filename)
+    get_cache_dir(data_dir).join(filename)
 }
 
 /// 核心接口：获取或提取缩略图
-pub fn generate_or_get_thumbnail(source_path: &Path, max_dimension: u32) -> Result<PathBuf, String> {
+/// data_dir: 数据库所在的数据根目录，缩略图保存在 {data_dir}/thumbnails/ 下
+pub fn generate_or_get_thumbnail(source_path: &Path, max_dimension: u32, data_dir: &Path) -> Result<PathBuf, String> {
     if !source_path.exists() {
         return Err(format!("源文件不存在: {:?}", source_path));
     }
 
-    let target_cache_path = get_cache_file_path(source_path, max_dimension);
+    let target_cache_path = get_cache_file_path(source_path, max_dimension, data_dir);
     if target_cache_path.exists() {
         return Ok(target_cache_path);
     }
