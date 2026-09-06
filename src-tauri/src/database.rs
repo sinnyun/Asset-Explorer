@@ -427,13 +427,28 @@ impl Database {
             ).map_err(|e| e.to_string())?;
         }
 
-        // 3. 批量插入资产
+        // 3. 批量插入资产（使用 UPSERT 保留已有关联，避免 INSERT OR REPLACE 级联清空 asset_tags/asset_collections）
         {
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO assets (
+                "INSERT INTO assets (
                     id, name, path, asset_type, size, folder_id, date_modified, date_added,
                     rating, favorite, color, width, height, file_hash, thumbnail_url
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    path = excluded.path,
+                    asset_type = excluded.asset_type,
+                    size = excluded.size,
+                    folder_id = excluded.folder_id,
+                    date_modified = excluded.date_modified,
+                    date_added = excluded.date_added,
+                    rating = excluded.rating,
+                    favorite = excluded.favorite,
+                    color = excluded.color,
+                    width = excluded.width,
+                    height = excluded.height,
+                    file_hash = excluded.file_hash,
+                    thumbnail_url = excluded.thumbnail_url",
             ).map_err(|e| e.to_string())?;
 
             for a in assets {
@@ -543,7 +558,7 @@ impl Database {
         }
         let placeholders = vec!["?"; asset_ids.len()].join(",");
         let query = format!(
-            "SELECT at.asset_id, t.name
+            "SELECT at.asset_id, t.id
              FROM asset_tags at
              JOIN tags t ON t.id = at.tag_id
              WHERE at.asset_id IN ({})",
@@ -571,7 +586,7 @@ impl Database {
         }
         let placeholders = vec!["?"; asset_ids.len()].join(",");
         let query = format!(
-            "SELECT ac.asset_id, c.name
+            "SELECT ac.asset_id, c.id
              FROM asset_collections ac
              JOIN collections c ON c.id = ac.collection_id
              WHERE ac.asset_id IN ({})",
@@ -721,6 +736,110 @@ impl Database {
                 .map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // 资产-标签/集合 关联关系同步（供 UI 设置标签/集合后持久化）
+    // =========================================================================
+
+    /// 同步设置单个资产的标签集合（全量替换：删除旧的关联再写入新关联）
+    pub fn sync_asset_tags(&self, asset_id: &str, tag_ids: &[String]) -> Result<(), String> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM asset_tags WHERE asset_id = ?1", params![asset_id])
+            .map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?1, ?2)"
+            ).map_err(|e| e.to_string())?;
+            for tag_id in tag_ids {
+                stmt.execute(params![asset_id, tag_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 同步设置单个资产的集合集合（全量替换）
+    pub fn sync_asset_collections(&self, asset_id: &str, collection_ids: &[String]) -> Result<(), String> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM asset_collections WHERE asset_id = ?1", params![asset_id])
+            .map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO asset_collections (asset_id, collection_id) VALUES (?1, ?2)"
+            ).map_err(|e| e.to_string())?;
+            for col_id in collection_ids {
+                stmt.execute(params![asset_id, col_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 批量同步多个资产的标签（用于 UI 中一次多选后统一打标签）
+    pub fn sync_many_asset_tags(&self, asset_ids: &[String], tag_ids: &[String]) -> Result<(), String> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?1, ?2)"
+            ).map_err(|e| e.to_string())?;
+            for asset_id in asset_ids {
+                for tag_id in tag_ids {
+                    stmt.execute(params![asset_id, tag_id])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 批量同步多个资产的集合（用于 UI 中一次多选后统一加入集合）
+    pub fn sync_many_asset_collections(&self, asset_ids: &[String], collection_ids: &[String]) -> Result<(), String> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO asset_collections (asset_id, collection_id) VALUES (?1, ?2)"
+            ).map_err(|e| e.to_string())?;
+            for asset_id in asset_ids {
+                for col_id in collection_ids {
+                    stmt.execute(params![asset_id, col_id])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 从资产移除指定标签
+    pub fn remove_asset_tags(&self, asset_id: &str, tag_ids: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock();
+        for tag_id in tag_ids {
+            conn.execute(
+                "DELETE FROM asset_tags WHERE asset_id = ?1 AND tag_id = ?2",
+                params![asset_id, tag_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// 从资产移除指定集合
+    pub fn remove_asset_collections(&self, asset_id: &str, collection_ids: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock();
+        for col_id in collection_ids {
+            conn.execute(
+                "DELETE FROM asset_collections WHERE asset_id = ?1 AND collection_id = ?2",
+                params![asset_id, col_id],
+            ).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 

@@ -122,6 +122,24 @@ export const apiClient: ApiProvider = {
   deleteAssets(ids: string[]): Promise<void> {
     return getProvider().deleteAssets(ids);
   },
+  syncAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    return getProvider().syncAssetTags(assetId, tagIds);
+  },
+  syncAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    return getProvider().syncAssetCollections(assetId, collectionIds);
+  },
+  syncManyAssetTags(assetIds: string[], tagIds: string[]): Promise<void> {
+    return getProvider().syncManyAssetTags(assetIds, tagIds);
+  },
+  syncManyAssetCollections(assetIds: string[], collectionIds: string[]): Promise<void> {
+    return getProvider().syncManyAssetCollections(assetIds, collectionIds);
+  },
+  removeAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    return getProvider().removeAssetTags(assetId, tagIds);
+  },
+  removeAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    return getProvider().removeAssetCollections(assetId, collectionIds);
+  },
 
   // ---- 文件夹 CRUD ----
   createFolder(folder: Folder): Promise<void> {

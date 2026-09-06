@@ -72,6 +72,24 @@ export interface ApiProvider {
   /** 批量删除资产 */
   deleteAssets(ids: string[]): Promise<void>;
 
+  /** 同步设置资产标签关联（全量替换） */
+  syncAssetTags(assetId: string, tagIds: string[]): Promise<void>;
+
+  /** 同步设置资产集合关联（全量替换） */
+  syncAssetCollections(assetId: string, collectionIds: string[]): Promise<void>;
+
+  /** 批量同步多个资产的标签（添加） */
+  syncManyAssetTags(assetIds: string[], tagIds: string[]): Promise<void>;
+
+  /** 批量同步多个资产的集合（添加） */
+  syncManyAssetCollections(assetIds: string[], collectionIds: string[]): Promise<void>;
+
+  /** 从资产移除指定标签 */
+  removeAssetTags(assetId: string, tagIds: string[]): Promise<void>;
+
+  /** 从资产移除指定集合 */
+  removeAssetCollections(assetId: string, collectionIds: string[]): Promise<void>;
+
   // ------------------------------------------------------------------------
   // 文件夹 CRUD（更新时传完整对象）
   // ------------------------------------------------------------------------

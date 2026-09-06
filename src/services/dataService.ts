@@ -73,6 +73,36 @@ class DataService {
     apiClient.deleteAssets(ids).catch(console.error);
   }
 
+  /** 同步设置资产标签关联（全量替换） */
+  async syncAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    await apiClient.syncAssetTags(assetId, tagIds);
+  }
+
+  /** 同步设置资产集合关联（全量替换） */
+  async syncAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    await apiClient.syncAssetCollections(assetId, collectionIds);
+  }
+
+  /** 批量同步多个资产的标签 */
+  async syncManyAssetTags(assetIds: string[], tagIds: string[]): Promise<void> {
+    await apiClient.syncManyAssetTags(assetIds, tagIds);
+  }
+
+  /** 批量同步多个资产的集合 */
+  async syncManyAssetCollections(assetIds: string[], collectionIds: string[]): Promise<void> {
+    await apiClient.syncManyAssetCollections(assetIds, collectionIds);
+  }
+
+  /** 从资产移除指定标签 */
+  async removeAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    await apiClient.removeAssetTags(assetId, tagIds);
+  }
+
+  /** 从资产移除指定集合 */
+  async removeAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    await apiClient.removeAssetCollections(assetId, collectionIds);
+  }
+
   // ------------------------------------------------------------------------
   // 文件夹 CRUD（兼容两种调用方式：完整对象 或 id+updates）
   // ------------------------------------------------------------------------

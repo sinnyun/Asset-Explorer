@@ -65,7 +65,7 @@ export default function App() {
   const {
     handleConfirmCreateEntity, handleBulkAddTags, handleBulkAddCollections,
     handleBulkDelete, handleUpdateTheme, handleRelocatePaths,
-  } = useMiscActions(createEntityModal, setState);
+  } = useMiscActions(createEntityModal, setState, state);
 
   // 右键菜单操作
   const {

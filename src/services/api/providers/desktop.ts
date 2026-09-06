@@ -186,6 +186,30 @@ class DesktopApiProvider implements ApiProvider {
     await callRust<void>('delete_assets', { ids });
   }
 
+  async syncAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    await callRust<void>('sync_asset_tags', { assetId, tagIds });
+  }
+
+  async syncAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    await callRust<void>('sync_asset_collections', { assetId, collectionIds });
+  }
+
+  async syncManyAssetTags(assetIds: string[], tagIds: string[]): Promise<void> {
+    await callRust<void>('sync_many_asset_tags', { assetIds, tagIds });
+  }
+
+  async syncManyAssetCollections(assetIds: string[], collectionIds: string[]): Promise<void> {
+    await callRust<void>('sync_many_asset_collections', { assetIds, collectionIds });
+  }
+
+  async removeAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    await callRust<void>('remove_asset_tags', { assetId, tagIds });
+  }
+
+  async removeAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    await callRust<void>('remove_asset_collections', { assetId, collectionIds });
+  }
+
   // ------------------------------------------------------------------------
   // 文件夹 CRUD
   // ------------------------------------------------------------------------

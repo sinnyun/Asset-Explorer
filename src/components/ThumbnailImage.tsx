@@ -40,7 +40,11 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [loadingState, setLoadingState] = useState<'idle' | 'loading' | 'done' | 'failed'>('idle');
   const isDesktop = useRef(
-    typeof window !== 'undefined' && typeof (window as any).__TAURI__ !== 'undefined'
+    typeof window !== 'undefined' && (
+      typeof (window as any).__TAURI__ !== 'undefined' ||
+      typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ||
+      typeof (window as any).__TAURI_IPC__ !== 'undefined'
+    )
   ).current;
   const mountedRef = useRef(true);
 

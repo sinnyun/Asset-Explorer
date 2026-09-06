@@ -11,7 +11,8 @@ import type { ThemeMode, Tag, Collection } from '../types';
  */
 export function useMiscActions(
   createEntityModal: { isOpen: boolean; type: 'tag' | 'collection' },
-  setState: React.Dispatch<React.SetStateAction<import('../types').AssetState>>
+  setState: React.Dispatch<React.SetStateAction<import('../types').AssetState>>,
+  state: import('../types').AssetState
 ) {
   const handleConfirmCreateEntity = async (data: { name: string; color: string; description?: string; isPinned: boolean }) => {
     if (createEntityModal.type === 'tag') {
@@ -55,28 +56,70 @@ export function useMiscActions(
     }
   };
 
-  const handleBulkAddTags = (tagIds: string[]) => {
+  const handleBulkAddTags = async (tagIds: string[]) => {
+    // 从 state 直接获取选中的资产/文件夹 ID
+    const selectedAssetIds = state.selectedItems.filter(i => i.type === 'asset').map(i => i.id);
+    const selectedFolderIds = state.selectedItems.filter(i => i.type === 'folder').map(i => i.id);
+
+    // 同步更新本地状态
     setState(p => ({
       ...p,
       assets: p.assets.map(a => {
-        if (p.selectedItems.some(i => i.type === 'asset' && i.id === a.id)) {
+        if (selectedAssetIds.includes(a.id)) {
           return { ...a, tags: Array.from(new Set([...a.tags, ...tagIds])) };
         }
         return a;
+      }),
+      folders: p.folders.map(f => {
+        if (selectedFolderIds.includes(f.id)) {
+          return { ...f, tags: Array.from(new Set([...(f.tags || []), ...tagIds])) };
+        }
+        return f;
       })
     }));
+
+    // 持久化到后端数据库（若存在选中的资产）
+    if (selectedAssetIds.length > 0 && tagIds.length > 0) {
+      try {
+        await dataService.syncManyAssetTags(selectedAssetIds, tagIds);
+        console.log(`[MiscActions] 已为 ${selectedAssetIds.length} 个资产持久化标签关联`);
+      } catch (err) {
+        console.error('[MiscActions] 持久化标签关联失败:', err);
+      }
+    }
   };
 
-  const handleBulkAddCollections = (colIds: string[]) => {
+  const handleBulkAddCollections = async (colIds: string[]) => {
+    // 从 state 直接获取选中的资产/文件夹 ID
+    const selectedAssetIds = state.selectedItems.filter(i => i.type === 'asset').map(i => i.id);
+    const selectedFolderIds = state.selectedItems.filter(i => i.type === 'folder').map(i => i.id);
+
+    // 同步更新本地状态
     setState(p => ({
       ...p,
       assets: p.assets.map(a => {
-        if (p.selectedItems.some(i => i.type === 'asset' && i.id === a.id)) {
+        if (selectedAssetIds.includes(a.id)) {
           return { ...a, collections: Array.from(new Set([...a.collections, ...colIds])) };
         }
         return a;
+      }),
+      folders: p.folders.map(f => {
+        if (selectedFolderIds.includes(f.id)) {
+          return { ...f, collections: Array.from(new Set([...(f.collections || []), ...colIds])) };
+        }
+        return f;
       })
     }));
+
+    // 持久化到后端数据库（若存在选中的资产）
+    if (selectedAssetIds.length > 0 && colIds.length > 0) {
+      try {
+        await dataService.syncManyAssetCollections(selectedAssetIds, colIds);
+        console.log(`[MiscActions] 已为 ${selectedAssetIds.length} 个资产持久化集合关联`);
+      } catch (err) {
+        console.error('[MiscActions] 持久化集合关联失败:', err);
+      }
+    }
   };
 
   const handleBulkDelete = (state: import('../types').AssetState) => {
