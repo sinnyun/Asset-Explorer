@@ -406,3 +406,41 @@ pub fn read_thumbnail_base64(file_path: String) -> Result<String, String> {
 
     Ok(format!("data:{};base64,{}", mime, b64))
 }
+
+/// 指令 26: 读取任意文件并以 base64 data URL 返回（用于文件预览）
+/// 与 read_thumbnail_base64 类似，但面向源文件而非缩略图缓存。
+/// 设定了 200MB 大小上限，超出部分建议直接使用 asset:// URL 方式加载。
+/// 使用 tokio::task::spawn_blocking 避免大文件读取阻塞 Tauri 主线程。
+#[tauri::command]
+pub async fn read_file_base64(file_path: String) -> Result<String, String> {
+    const MAX_PREVIEW_BYTES: u64 = 200 * 1024 * 1024; // 200MB
+
+    let path_clone = file_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let path = std::path::Path::new(&path_clone);
+        if !path.exists() {
+            return Err(format!("文件不存在: {}", path_clone));
+        }
+
+        // 检查文件大小，防止读取超大文件到内存
+        let meta = std::fs::metadata(path).map_err(|e| format!("读取文件元信息失败: {}", e))?;
+        if meta.len() > MAX_PREVIEW_BYTES {
+            return Err(format!("文件过大({} bytes)，超出预览限制", meta.len()));
+        }
+
+        let bytes = std::fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+
+        // 使用 mime_guess 根据扩展名推断 MIME 类型
+        let mime = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|ext| mime_guess::from_ext(ext).first())
+            .map(|m| m.essence_str().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+
+        Ok(format!("data:{};base64,{}", mime, b64))
+    })
+    .await
+    .map_err(|e| format!("后台线程执行失败: {}", e))?
+}
