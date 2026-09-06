@@ -2,11 +2,11 @@
 //! 模块：文件监控 (watcher.rs)
 //! 职责：使用 notify 监听用户已添加到工作区的文件夹变动（新增、重命名、删除），
 //! 并实时更新数据库并向 Tauri 前端发送事件通知刷新视图。
-//! 依赖开源库：`notify` v6, `tauri`
+//! 依赖开源库：`notify` v6, `tauri`, `chrono`
 //! ============================================================================
 
 use crate::database::Database;
-use crate::indexer::infer_category_from_extension;
+use crate::indexer::{infer_category_from_extension, stable_hash};
 use chrono::Utc;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -127,12 +127,12 @@ fn handle_file_event(app_handle: &tauri::AppHandle, db: &Database, event: &Event
             )?;
 
             // 发送事件给前端
-                    let _ = app_handle.emit("asset:added", AssetChangeEvent {
-                        asset_id: Some(asset.id),
-                        path: path_str.clone(),
-                        action: "added".to_string(),
-                    });
-                    println!("[Watcher] 新文件已添加: {}", path_str);
+            let _ = app_handle.emit("asset:added", AssetChangeEvent {
+                asset_id: Some(asset.id),
+                path: path_str.clone(),
+                action: "added".to_string(),
+            });
+            println!("[Watcher] 新文件已添加: {}", path_str);
         }
 
         // ============================================================
@@ -219,7 +219,7 @@ fn create_asset_from_path(path: &Path) -> Result<crate::models::Asset, String> {
         })
         .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-    let id = format!("ast_{:x}", md5_hash(&file_str));
+    let id = format!("ast_{}", stable_hash(&file_str));
 
     Ok(crate::models::Asset {
         id,
@@ -240,13 +240,4 @@ fn create_asset_from_path(path: &Path) -> Result<crate::models::Asset, String> {
         file_hash: None,
         thumbnail_url: None,
     })
-}
-
-/// 简易哈希生成函数
-fn md5_hash(input: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    hasher.finish()
 }

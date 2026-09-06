@@ -1,13 +1,13 @@
 //! ============================================================================
 //! 模块：索引文件夹 (indexer.rs)
 //! 职责：负责扫描本地磁盘目录、解析文件夹层级树、并发发现文件并建立资产数据结构。
-//! 依赖开源库：`walkdir`, `rayon`, `chrono`, `sha2`
+//! 依赖开源库：`walkdir`, `rayon`, `chrono`, `sha2`, `mime_guess`
 //! ============================================================================
 
 use crate::models::{Asset, Folder, ScanResult};
 use chrono::Utc;
 use rayon::prelude::*;
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -27,16 +27,69 @@ fn is_ignored_entry(entry: &DirEntry) -> bool {
 }
 
 /// 根据文件后缀名快速推断大类类型
+/// 使用 mime_guess 开源库将扩展名映射为 MIME 类型，再归入业务大类。
+/// 3D 文件格式不被 mime_guess 完整覆盖，额外保留补充映射。
 pub fn infer_category_from_extension(ext: &str) -> &'static str {
-    match ext.to_lowercase().as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "tiff" => "image",
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" => "video",
-        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" => "document",
-        "obj" | "fbx" | "gltf" | "glb" | "blend" | "stl" | "dae" => "3d",
-        "zip" | "rar" | "7z" | "tar" | "gz" => "archive",
+    let ext_lower = ext.to_lowercase();
+
+    // 优先使用 mime_guess 开源库获取标准 MIME 类型
+    let mime = mime_guess::from_ext(&ext_lower)
+        .first()
+        .map(|m| m.essence_str().to_string())
+        .unwrap_or_default();
+
+    // 1. 基于 MIME 顶层类型快速归类
+    if mime.starts_with("image/") {
+        return "image";
+    }
+    if mime.starts_with("video/") {
+        return "video";
+    }
+    if mime.starts_with("audio/") {
+        return "audio";
+    }
+
+    // 2. 基于 MIME essence 精确匹配文档/归档类型
+    match mime.as_str() {
+        // 文档类型
+        "application/pdf" | "text/plain" | "text/markdown" | "text/x-markdown" | "application/rtf"
+        | "application/msword"
+        | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.ms-excel"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        | "application/vnd.ms-powerpoint"
+        | "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+            return "document"
+        }
+        // 归档压缩
+        "application/zip" | "application/x-rar-compressed" | "application/x-7z-compressed"
+        | "application/x-tar" | "application/gzip" | "application/x-gzip"
+        | "application/x-bzip2" | "application/x-bzip" | "application/x-compressed" => {
+            return "archive"
+        }
+        _ => {}
+    }
+
+    // 3. mime_guess 未覆盖的扩展名补充映射（3D/归档/文档等不常见格式）
+    match ext_lower.as_str() {
+        // 3D 文件格式
+        "obj" | "fbx" | "gltf" | "glb" | "blend" | "stl" | "dae" | "3ds" | "max" | "c4d" => "3d",
+        // 归档文件（mime_guess 可能未识别）
+        "rar" | "7z" | "zip" | "tar" | "gz" | "bz2" | "xz" => "archive",
+        // 文档补充格式
+        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "md" => "document",
         _ => "other",
     }
+}
+
+/// 使用 sha2 生成稳定的确定性哈希字符串
+/// 替代原有的 DefaultHasher（SipHash 带进程随机种子，重启后 ID 会漂移）
+/// 取 SHA-256 前 8 字节（16 hex 字符），确保 ID 稳定且紧凑
+pub fn stable_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8])
 }
 
 /// 扫描指定本地目录并返回完整的文件夹树与资产列表
@@ -57,7 +110,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| root_path_str.to_string());
 
-    let root_id = format!("f_root_{:x}", md5_hash(root_path_str));
+    let root_id = format!("f_root_{}", stable_hash(root_path_str));
 
     let root_folder = Folder {
         id: root_id.clone(),
@@ -100,7 +153,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
 
     for dir_path in &discovered_dirs {
         let dir_str = dir_path.to_string_lossy().to_string();
-        let folder_id = format!("f_{:x}", md5_hash(&dir_str));
+        let folder_id = format!("f_{}", stable_hash(&dir_str));
         path_to_id.insert(dir_path.clone(), folder_id.clone());
 
         let name = dir_path
@@ -161,7 +214,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
                 })
                 .unwrap_or_else(|| now_str.clone());
 
-            let id = format!("ast_{:x}", md5_hash(&file_str));
+            let id = format!("ast_{}", stable_hash(&file_str));
 
             Some(Asset {
                 id,
@@ -195,13 +248,4 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
         total_files_scanned: total_scanned,
         total_duration_ms: duration,
     })
-}
-
-/// 简易高效哈希生成函数 (用于生成稳定的路径 ID 与哈希)
-fn md5_hash(input: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    hasher.finish()
 }
