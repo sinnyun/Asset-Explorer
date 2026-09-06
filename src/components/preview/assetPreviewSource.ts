@@ -17,17 +17,7 @@
  * ============================================================================
  */
 import type { Asset } from '../../types';
-import { apiClient } from '../../services/api';
-
-/** 是否为 Tauri 桌面环境（与 ThumbnailImage 中的判断保持一致） */
-function isDesktopEnv(): boolean {
-  if (typeof window === 'undefined') return false;
-  return (
-    typeof (window as any).__TAURI__ !== 'undefined' ||
-    typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ||
-    typeof (window as any).__TAURI_IPC__ !== 'undefined'
-  );
-}
+import { apiClient, isTauriDesktop } from '../../services/api';
 
 /** 判断字符串是否为 http(s) 远程 URL */
 function isHttpUrl(str: string): boolean {
@@ -70,7 +60,7 @@ export async function resolveAssetPreviewSource(asset: Asset): Promise<string | 
   // ============================================================
   // 1. 桌面 Tauri 环境
   // ============================================================
-  if (isDesktopEnv()) {
+  if (isTauriDesktop()) {
     try {
       const { convertFileSrc } = await import('@tauri-apps/api/core');
       if (!asset.path) return null;

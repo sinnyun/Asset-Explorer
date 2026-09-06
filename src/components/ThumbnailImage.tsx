@@ -10,7 +10,7 @@
  */
 import React, { useState, useEffect, useRef } from 'react';
 import { Asset } from '../types';
-import { dataService } from '../services/dataService';
+import { dataService, isTauriDesktop } from '../services/dataService';
 import { Loader2 } from 'lucide-react';
 
 interface ThumbnailImageProps {
@@ -39,13 +39,7 @@ interface ThumbnailImageProps {
 export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 'lazy' }: ThumbnailImageProps) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [loadingState, setLoadingState] = useState<'idle' | 'loading' | 'done' | 'failed'>('idle');
-  const isDesktop = useRef(
-    typeof window !== 'undefined' && (
-      typeof (window as any).__TAURI__ !== 'undefined' ||
-      typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ||
-      typeof (window as any).__TAURI_IPC__ !== 'undefined'
-    )
-  ).current;
+  const isDesktop = useRef(isTauriDesktop()).current;
   const mountedRef = useRef(true);
 
   useEffect(() => {

@@ -284,7 +284,7 @@ type AppEnvironment = 'desktop' | 'remote-web' | 'local-web';
 ```
 
 检测优先级：**Tauri 桌面 > 远程 Web > 本地 Web**
-- 桌面检测：`window.__TAURI__` / `__TAURI_INTERNALS__` / `__TAURI_IPC__` 全局标记
+- 桌面检测：`__TAURI_INTERNALS__` 全局标记
 - 远程 Web 检测：Vite 注入的 `VITE_APP_ENV === 'remote'` 或非 localhost 的 `VITE_APP_URL`
 - 提供 `getApiBaseUrl()` 获取 API 基地址
 

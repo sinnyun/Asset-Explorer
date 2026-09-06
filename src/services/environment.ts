@@ -4,7 +4,7 @@
  * 模块：环境检测引擎 (environment.ts)
  * 职责：统一检测当前运行环境（桌面/远程Web/本地Web），并提供相应的配置信息。
  * 检测机制：
- *   1. Tauri 桌面环境 → 检测 window.__TAURI__ 或 __TAURI_INTERNALS__
+ *   1. Tauri 桌面环境 → 检测 __TAURI_INTERNALS__
  *   2. 远程 Web 环境 → 检测 APP_ENV=remote 环境变量
  *   3. 本地 Web 环境 → 默认（本地开发服务器）
  * ============================================================================
@@ -31,15 +31,11 @@ export interface EnvironmentConfig {
 
 /**
  * 检测是否为 Tauri 桌面环境
- * 通过检查 window 对象上是否存在 Tauri 注入的全局标记来判断
+ * 通过检查 window 对象上是否存在 __TAURI_INTERNALS__ 来判断
  */
 export function isTauriDesktop(): boolean {
   if (typeof window === 'undefined') return false;
-  return (
-    '__TAURI__' in window ||
-    '__TAURI_INTERNALS__' in window ||
-    (window as any).__TAURI_IPC__ !== undefined
-  );
+  return '__TAURI_INTERNALS__' in window;
 }
 
 /**
