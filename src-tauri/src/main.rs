@@ -13,6 +13,7 @@ mod watcher;
 use commands::*;
 use database::Database;
 use std::sync::Arc;
+use tauri::Manager;
 
 fn main() {
     // 初始化本地 SQLite 数据库 (高并发 WAL 模式)
@@ -79,6 +80,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_workspace,
             scan_directory,
+            search_assets,
             set_asset_rating,
             set_asset_favorite,
             delete_assets,
