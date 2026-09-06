@@ -1,22 +1,23 @@
 //! ============================================================================
 //! 模块：索引文件夹 (indexer.rs)
 //! 职责：负责扫描本地磁盘目录、解析文件夹层级树、并发发现文件并建立资产数据结构。
-//! 依赖开源库：`walkdir`, `rayon`, `chrono`, `sha2`, `mime_guess`
+//! 依赖开源库：`ignore`(WalkBuilder), `rayon`, `chrono`, `sha2`, `mime_guess`
 //! ============================================================================
 
+use crate::metadata_extractor;
 use crate::models::{Asset, Folder, ScanResult};
 use chrono::Utc;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
-use walkdir::{DirEntry, WalkDir};
 
 /// 检查路径是否为应忽略的隐藏目录或常见构建缓存
-fn is_ignored_entry(entry: &DirEntry) -> bool {
+/// 额外使用 ignore 开源库的 WalkBuilder 支持 .gitignore 规则
+fn is_ignored_entry(entry: &ignore::DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
-    if name.starts_with('.') && name != "." {
+    if name.starts_with('.') && name != "." && name != ".." {
         return true;
     }
     // Windows/开发环境常见忽略目录
@@ -92,7 +93,13 @@ pub fn stable_hash(input: &str) -> String {
     hex::encode(&result[..8])
 }
 
+/// 是否是需要计算 SHA-256 和提取尺寸的媒体格式（图片直接提取尺寸，视频可留待后续）
+fn should_extract_deep_metadata(asset_type: &str) -> bool {
+    matches!(asset_type, "image")
+}
+
 /// 扫描指定本地目录并返回完整的文件夹树与资产列表
+/// 使用 ignore::WalkBuilder 支持 .gitignore 规则
 /// 使用多线程加速处理与元数据获取
 pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
     let start_time = Instant::now();
@@ -121,22 +128,32 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
         asset_count: None,
     };
 
-    // 1. 使用 WalkDir 收集所有子目录与文件路径
+    // 1. 使用 ignore crate 的 WalkBuilder 遍历目录
+    //    自动读取 .gitignore / .ignore 规则文件，支持 git 风格忽略规则
     let mut discovered_dirs: Vec<PathBuf> = Vec::new();
     let mut discovered_files: Vec<PathBuf> = Vec::new();
 
-    let walker = WalkDir::new(&root_path)
-        .min_depth(1)
-        .into_iter()
-        .filter_entry(|e| !is_ignored_entry(e));
+    // WalkBuilder 默认支持读取 .gitignore 与全局 ignore 规则
+    // hidden(false) 表示不跳过隐藏文件目录，交由 is_ignored_entry 精确控制，
+    // 避免将 `.gitignore` / `.git` 等文件本身直接过滤掉
+    let walker = ignore::WalkBuilder::new(&root_path)
+        .min_depth(Some(1))
+        .hidden(false) // 我们自研处理，控制更精细
+        .parents(true) // 支持读取父目录中的 .gitignore
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .filter_entry(|e| !is_ignored_entry(e))
+        .build();
 
     for entry_result in walker {
         match entry_result {
             Ok(entry) => {
                 let path = entry.path().to_path_buf();
-                if entry.file_type().is_dir() {
+                if entry.file_type().is_some_and(|ft| ft.is_dir()) {
                     discovered_dirs.push(path);
-                } else if entry.file_type().is_file() {
+                } else if entry.file_type().is_some_and(|ft| ft.is_file()) {
                     discovered_files.push(path);
                 }
             }
@@ -177,8 +194,8 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
     }
 
     // 3. 使用 Rayon 并行并发解析文件元数据与资产结构
+    //    同时调用 metadata_extractor 提取图片尺寸/SHA256 等深度元数据
     let now_str = Utc::now().to_rfc3339();
-    let root_path_ref = &root_path;
 
     let assets: Vec<Asset> = discovered_files
         .par_iter()
@@ -216,6 +233,31 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
 
             let id = format!("ast_{}", stable_hash(&file_str));
 
+            // ==================================================================
+            // 修复元数据提取链路：将 extract_metadata 的结果接入扫描流程
+            // 此前 extract_metadata 虽已实现但从未在扫描时调用，SHA256 和
+            // 图片尺寸字段永远为空。现在在并行扫描中自动提取深度元数据。
+            // ==================================================================
+            let (width, height, file_hash) = if should_extract_deep_metadata(&asset_type) {
+                let meta = metadata_extractor::extract_metadata(file_path);
+                // 只对图片/音频/视频等媒体格式计算 SHA-256；文档也计算用于重复检测
+                let hash = if file_size < 100 * 1024 * 1024 {
+                    // 小于 100MB 的文件计算完整 SHA-256（流式读取，内存安全）
+                    metadata_extractor::compute_sha256(file_path).ok()
+                } else {
+                    None // 超大文件跳过哈希计算，避免 IO 阻塞
+                };
+                (meta.width, meta.height, hash)
+            } else {
+                // 非图片/文档格式：仅在文件较小时计算哈希用于重复检测
+                let hash = if file_size < 50 * 1024 * 1024 {
+                    metadata_extractor::compute_sha256(file_path).ok()
+                } else {
+                    None
+                };
+                (None, None, hash)
+            };
+
             Some(Asset {
                 id,
                 name: file_name,
@@ -230,9 +272,9 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
                 rating: 0,
                 favorite: false,
                 color: None,
-                width: None,
-                height: None,
-                file_hash: None,
+                width,
+                height,
+                file_hash,
                 thumbnail_url: None,
             })
         })

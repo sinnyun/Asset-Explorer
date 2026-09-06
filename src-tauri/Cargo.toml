@@ -27,9 +27,11 @@ rayon = "1.10"
 tokio = { version = "1.38", features = ["full"] }
 
 # Directory Traversal & Fast File Indexing
-walkdir = "2.5"
+# ignore crate provides .gitignore-aware directory walking
+ignore = "0.4"
 
-# File Monitoring & Realtime Watcher
+# File Monitoring & Realtime Watcher (debounced)
+notify-debouncer-full = "0.3"
 notify = "6.1"
 
 # Image Processing & Thumbnail Generation
@@ -50,16 +52,18 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 
 # Embedded High-Performance Local Database (SQLite with zero external dependencies)
-rusqlite = { version = "0.31", features = ["bundled"] }
+# bundled 内嵌 SQLite >=3.41，原生支持 FTS5 全文搜索
+rusqlite = { version = "0.31", features = ["bundled", "functions"] }
 
 # Cross-platform file/directory operations
 fs_extra = "1.2"
 
 # Cross-platform "open in file manager" / "reveal file"
-opener = "0.7"
+opener = { version = "0.7", features = ["reveal"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = [
+# 使用 windows crate 官方高层绑定（自动管理 COM 引用计数，消除手写 unsafe）
+windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Threading",

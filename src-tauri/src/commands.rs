@@ -62,6 +62,16 @@ pub async fn scan_directory(db: State<'_, Database>, path: String) -> Result<Sca
     .map_err(|e| e.to_string())?
 }
 
+/// 指令 2b: 全文搜索资产（SQLite FTS5）
+#[tauri::command]
+pub async fn search_assets(db: State<'_, Database>, query: String, limit: Option<usize>) -> Result<Vec<Asset>, String> {
+    let db = db.inner().clone();
+    let limit = limit.unwrap_or(100);
+    tokio::task::spawn_blocking(move || db.search_assets(&query, limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 指令 3: 后端数据库更新资产评分
 #[tauri::command]
 pub async fn set_asset_rating(db: State<'_, Database>, id: String, rating: u8) -> Result<(), String> {

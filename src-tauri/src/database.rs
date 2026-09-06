@@ -7,8 +7,9 @@
 
 use crate::models::{Asset, Collection, Folder, SmartFolder, SmartFolderRule, Tag};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,6 +63,9 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
     data_dir: PathBuf,
 }
+
+/// 批量关联映射：asset_id → Vec<name_or_id>
+type AssocMap = HashMap<String, Vec<String>>;
 
 impl Database {
     /// 初始化并连接本地 SQLite 数据库文件
@@ -325,6 +329,67 @@ impl Database {
             let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
         }
 
+        // 5. 创建 FTS5 全文搜索虚拟表（SQLite >= 3.41 bundled 自带 FTS5）
+        // 使用外部内容表关联 assets 表，FTS 索引通过触发器自动同步
+        conn.execute_batch(
+            "
+            -- FTS5 全文搜索虚拟表（外部内容关联 assets 表）
+            CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
+                name,
+                path,
+                asset_type,
+                content='assets',
+                content_rowid='rowid',
+                tokenize='unicode61'
+            );
+            ",
+        )
+        .map_err(|e| format!("FTS5 全文搜索索引初始化失败: {}", e))?;
+
+        // 仅当 assets 表已有数据但 FTS 索引为空时重建（首次升级场景）
+        // 已有 FTS 索引的场景无需重建，触发器将自动维护同步
+        let asset_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+            .map_err(|e| format!("统计资产数量失败: {}", e))?;
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM assets_fts", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        if asset_count > 0 && fts_count == 0 {
+            // 旧库升级首次迁移：将已有资产全量写入 FTS 索引
+            conn.execute_batch(
+                "
+                INSERT INTO assets_fts(assets_fts) VALUES('rebuild');
+                ",
+            )
+            .map_err(|e| format!("FTS5 索引重建失败: {}", e))?;
+            println!("[Database] FTS5 索引重建完成 ({} 条资产)", asset_count);
+        }
+        // 6. 为 assets 表创建 AFTER 触发器，实现 FTS 索引自动同步
+        //    - 当 assets 插入/更新/删除时自动维护 FTS 索引
+        conn.execute_batch(
+            "
+            CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
+                INSERT INTO assets_fts(rowid, name, path, asset_type)
+                VALUES (new.rowid, new.name, new.path, new.asset_type);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS assets_ad AFTER DELETE ON assets BEGIN
+                INSERT INTO assets_fts(assets_fts, rowid, name, path, asset_type)
+                VALUES ('delete', old.rowid, old.name, old.path, old.asset_type);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE ON assets BEGIN
+                INSERT INTO assets_fts(assets_fts, rowid, name, path, asset_type)
+                VALUES ('delete', old.rowid, old.name, old.path, old.asset_type);
+                INSERT INTO assets_fts(rowid, name, path, asset_type)
+                VALUES (new.rowid, new.name, new.path, new.asset_type);
+            END;
+            ",
+        )
+        .map_err(|e| format!("FTS5 触发器初始化失败: {}", e))?;
+
         Ok(())
     }
 
@@ -397,14 +462,28 @@ impl Database {
         Ok(())
     }
 
+    // =========================================================================
+    // 批量关联加载工具（解决 N+1 查询问题）
+    //
+    // 旧方案：get_all_assets() 对每个资产分别执行 2 条查询 (get_tags_for_asset_internal
+    // 与 get_cols_for_asset_internal)，10 万资产时会产生 20 万次额外查询 → 极大延迟。
+    //
+    // 新方案：仅用 2 条 JOIN 查询将全部资产的 tags / collections 批量拉回，
+    // 建立 HashMap 索引后 O(1) 内存合并。10 万资产查询耗时从 ~秒级降至毫秒级。
+    // =========================================================================
+
     /// 获取所有资产列表及附带标签/集合关联
     pub fn get_all_assets(&self) -> Result<Vec<Asset>, String> {
         let conn = self.conn.lock();
+
+        // 第一步：一次 JOIN 查询拉取全部资产
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, asset_type, size, folder_id, date_modified, date_added,
-                        rating, favorite, color, width, height, file_hash, thumbnail_url
-                 FROM assets ORDER BY date_modified DESC",
+                "SELECT a.id, a.name, a.path, a.asset_type, a.size, a.folder_id,
+                        a.date_modified, a.date_added, a.rating, a.favorite,
+                        a.color, a.width, a.height, a.file_hash, a.thumbnail_url
+                 FROM assets a
+                 ORDER BY a.date_modified DESC",
             )
             .map_err(|e| e.to_string())?;
 
@@ -434,45 +513,167 @@ impl Database {
 
         let mut assets = Vec::new();
         for a in asset_iter {
-            if let Ok(mut asset) = a {
-                // 关联标签
-                if let Ok(tags) = self.get_tags_for_asset_internal(&conn, &asset.id) {
-                    asset.tags = tags;
-                }
-                // 关联集合
-                if let Ok(cols) = self.get_cols_for_asset_internal(&conn, &asset.id) {
-                    asset.collections = cols;
-                }
+            if let Ok(asset) = a {
                 assets.push(asset);
             }
+        }
+
+        if assets.is_empty() {
+            return Ok(assets);
+        }
+
+        // 第二步：批量加载全部 asset_id → tags 映射（仅 1 条 JOIN 查询）
+        let asset_ids: Vec<&str> = assets.iter().map(|a| a.id.as_str()).collect();
+        let tags_map = Self::load_tags_for_assets(&conn, &asset_ids)?;
+        let cols_map = Self::load_cols_for_assets(&conn, &asset_ids)?;
+
+        // 第三步：内存 O(1) 合并
+        for asset in &mut assets {
+            asset.tags = tags_map.get(&asset.id).cloned().unwrap_or_default();
+            asset.collections = cols_map.get(&asset.id).cloned().unwrap_or_default();
         }
 
         Ok(assets)
     }
 
-    fn get_tags_for_asset_internal(&self, conn: &Connection, asset_id: &str) -> SqlResult<Vec<String>> {
-        let mut stmt = conn.prepare("SELECT tag_id FROM asset_tags WHERE asset_id = ?1")?;
-        let rows = stmt.query_map(params![asset_id], |row| row.get(0))?;
-        let mut tags = Vec::new();
-        for r in rows.flatten() {
-            tags.push(r);
+    /// 一次 JOIN 查询加载全部资产的标签（消除 N+1）
+    fn load_tags_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
+        if asset_ids.is_empty() {
+            return Ok(HashMap::new());
         }
-        Ok(tags)
+        let placeholders = vec!["?"; asset_ids.len()].join(",");
+        let query = format!(
+            "SELECT at.asset_id, t.name
+             FROM asset_tags at
+             JOIN tags t ON t.id = at.tag_id
+             WHERE at.asset_id IN ({})",
+            placeholders
+        );
+
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(asset_ids), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut map: AssocMap = HashMap::new();
+        for r in rows.flatten() {
+            map.entry(r.0).or_default().push(r.1);
+        }
+        Ok(map)
     }
 
-    fn get_cols_for_asset_internal(&self, conn: &Connection, asset_id: &str) -> SqlResult<Vec<String>> {
-        let mut stmt = conn.prepare("SELECT collection_id FROM asset_collections WHERE asset_id = ?1")?;
-        let rows = stmt.query_map(params![asset_id], |row| row.get(0))?;
-        let mut cols = Vec::new();
-        for r in rows.flatten() {
-            cols.push(r);
+    /// 一次 JOIN 查询加载全部资产的集合（消除 N+1）
+    fn load_cols_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
+        if asset_ids.is_empty() {
+            return Ok(HashMap::new());
         }
-        Ok(cols)
+        let placeholders = vec!["?"; asset_ids.len()].join(",");
+        let query = format!(
+            "SELECT ac.asset_id, c.name
+             FROM asset_collections ac
+             JOIN collections c ON c.id = ac.collection_id
+             WHERE ac.asset_id IN ({})",
+            placeholders
+        );
+
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(asset_ids), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut map: AssocMap = HashMap::new();
+        for r in rows.flatten() {
+            map.entry(r.0).or_default().push(r.1);
+        }
+        Ok(map)
+    }
+
+    // =========================================================================
+    // FTS5 全文搜索
+    // =========================================================================
+
+    /// 全文搜索资产（基于 SQLite FTS5 索引）
+    /// query: 用户输入的搜索关键字（支持 FTS5 MATCH 语法）
+    /// limit: 返回最大条数
+    pub fn search_assets(&self, query: &str, limit: usize) -> Result<Vec<Asset>, String> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 构造 FTS5 搜索表达式：支持 name/path/asset_type 三个列
+        // 将用户输入转义 FTS5 特殊字符，构造 MATCH 语法
+        let fts_query = build_fts_query(query);
+
+        let conn = self.conn.lock();
+
+        // 通过 FTS5 索引定位匹配的 rowid，再 JOIN assets 表获取完整数据
+        let sql = format!(
+            "SELECT a.id, a.name, a.path, a.asset_type, a.size, a.folder_id,
+                    a.date_modified, a.date_added, a.rating, a.favorite,
+                    a.color, a.width, a.height, a.file_hash, a.thumbnail_url
+             FROM assets_fts f
+             JOIN assets a ON a.rowid = f.rowid
+             WHERE f MATCH ?1
+             ORDER BY a.date_modified DESC
+             LIMIT ?2"
+        );
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("FTS5 搜索准备失败: {}", e))?;
+
+        let rows = stmt
+            .query_map(params![fts_query, limit as i64], |row| {
+                Ok(Asset {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    asset_type: row.get(3)?,
+                    size: row.get::<_, i64>(4)? as u64,
+                    folder_id: row.get(5)?,
+                    date_modified: row.get(6)?,
+                    date_added: row.get(7)?,
+                    rating: row.get::<_, i32>(8)? as u8,
+                    favorite: row.get::<_, i32>(9)? != 0,
+                    color: row.get(10)?,
+                    width: row.get(11)?,
+                    height: row.get(12)?,
+                    file_hash: row.get(13)?,
+                    thumbnail_url: row.get(14)?,
+                    tags: Vec::new(),
+                    collections: Vec::new(),
+                })
+            })
+            .map_err(|e| format!("FTS5 搜索执行失败: {}", e))?;
+
+        let mut found = Vec::new();
+        for r in rows.flatten() {
+            found.push(r);
+        }
+
+        // 若结果非空，同样批量加载关联标签与集合（消除 N+1）
+        if !found.is_empty() {
+            let ids: Vec<&str> = found.iter().map(|a| a.id.as_str()).collect();
+            let tags_map = Self::load_tags_for_assets(&conn, &ids)?;
+            let cols_map = Self::load_cols_for_assets(&conn, &ids)?;
+            for asset in &mut found {
+                asset.tags = tags_map.get(&asset.id).cloned().unwrap_or_default();
+                asset.collections = cols_map.get(&asset.id).cloned().unwrap_or_default();
+            }
+        }
+
+        Ok(found)
     }
 
     /// 更新资产基础属性 (评分/收藏/重命名/颜色)
     pub fn update_asset_field(&self, id: &str, field: &str, value: &str) -> Result<(), String> {
         let conn = self.conn.lock();
+        // 若更新 name 字段，FTS 触发器 assets_au 会自动同步全文索引
         let query = format!("UPDATE assets SET {} = ?1 WHERE id = ?2", field);
         conn.execute(&query, params![value, id])
             .map_err(|e| e.to_string())?;
@@ -892,4 +1093,54 @@ impl Database {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// 将用户输入的关键词转为 FTS5 安全搜索表达式
+/// 支持多词 AND 匹配：用户输入多个空格分隔的单词时，全部单词都必须出现
+fn build_fts_query(user_input: &str) -> String {
+    let words: Vec<&str> = user_input
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    if words.is_empty() {
+        return user_input.to_string();
+    }
+
+    // 对每个词转义 FTS5 特殊字符，并用双引号包裹防止语法注入
+    let escaped: Vec<String> = words
+        .iter()
+        .map(|w| {
+            let cleaned: String = w
+                .chars()
+                .map(|c| match c {
+                    '"' | '\'' | '(' | ')' | ':' | '*' | '-' | '^' | '/' | '~' | '\\' | '{' | '}' | '[' | ']' | '!' | '&' | '|' | '>' | '<' | '+' | '=' | '%' => ' ',
+                    c => c,
+                })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<&str>>()
+                .join(" ");
+
+            if cleaned.contains(' ') {
+                // 若被分割成多个片段，各片段独立 AND 匹配
+                cleaned
+                    .split_whitespace()
+                    .map(|s| format!("\"{}\"", s))
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            } else if !cleaned.is_empty() {
+                format!("\"{}\"", cleaned)
+            } else {
+                String::new()
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if escaped.is_empty() {
+        return user_input.to_string();
+    }
+    escaped.join(" ")
 }

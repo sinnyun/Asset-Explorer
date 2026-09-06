@@ -5,8 +5,12 @@
 //! 2. 若系统缓存不存在，自动调用 Windows Shell 提取器 (IShellItemImageFactory) 提取生成
 //! 3. 跨平台/格式兜底：调用 Rust `image` 开源库解码缩放
 //! 4. 自动持久化在本地缓存目录，避免重复调用
-//! 注意：缓存目录跟随用户的 data_dir 配置（与数据库同目录下的 thumbnails/ 子目录），
-//!       而非固定系统路径，确保数据迁移后缩略图也随同迁移。
+//!
+//! Windows COM 安全改造：
+//! 旧版使用 windows-sys 裸 FFI + 手写 COM vtable（IShellItemImageFactoryVtbl），
+//! 手动 dispatch QueryInterface/AddRef/Release，包含大量手写 unsafe。
+//! 新版改用 `windows` crate 官方高层绑定，由 crate 自动生成并管理
+//! COM 接口的 vtable 调用与引用计数，代码更安全、可维护。
 //! ============================================================================
 
 use std::fs;
@@ -67,126 +71,82 @@ fn extract_via_image_crate(source_path: &Path, max_dimension: u32, target_cache_
     Ok(target_cache_path.to_path_buf())
 }
 
+// ============================================================================
+// Windows 平台 — windows crate 官方高层绑定（消除手写 COM vtable）
+// ============================================================================
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::*;
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    // 注意：windows-sys 0.52 中 HBITMAP 定义在 Graphics::Gdi 模块（0.59+ 才移至 Foundation）
-    use windows_sys::Win32::Foundation::{HWND, S_OK};
-    use windows_sys::Win32::Graphics::Gdi::{
-        DeleteObject, GetDIBits, GetObjectW, HBITMAP, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS,
+    use std::path::Path;
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::Foundation::{HWND, SIZE};
+    use windows::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, HBITMAP, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     };
-    use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-    use windows_sys::core::GUID;
-
-    // IShellItemImageFactory GUID: bcc18b79-ba16-442f-80c4-8a59c30c463b
-    const IID_ISHELLITEMIMAGEFACTORY: GUID = GUID {
-        data1: 0xbcc18b79,
-        data2: 0xba16,
-        data3: 0x442f,
-        data4: [0x80, 0xc4, 0x8a, 0x59, 0xc3, 0x0c, 0x46, 0x3b],
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    use windows::Win32::UI::Shell::{
+        IShellItemImageFactory, SIIGBF_BIGGERSIZEOK, SIIGBF_INCACHEONLY, SIIGBF_RESIZETOFIT,
+        SHCreateItemFromParsingName,
     };
-
-    // Windows Shell 缩略图提取标志
-    const SIIGBF_RESIZETOFIT: i32 = 0x00000000;
-    const SIIGBF_BIGGERSIZEOK: i32 = 0x00000001;
-    const SIIGBF_INCACHEONLY: i32 = 0x00000020; // 仅从 Windows 现存缓存中读取，若无则快速失败
-
-    #[repr(C)]
-    struct SIZE {
-        cx: i32,
-        cy: i32,
-    }
-
-    #[repr(C)]
-    struct IShellItemImageFactoryVtbl {
-        pub QueryInterface: unsafe extern "system" fn(this: *mut std::ffi::c_void, riid: *const GUID, ppv: *mut *mut std::ffi::c_void) -> i32,
-        pub AddRef: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
-        pub Release: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
-        pub GetImage: unsafe extern "system" fn(this: *mut std::ffi::c_void, size: SIZE, flags: i32, phbm: *mut HBITMAP) -> i32,
-    }
-
-    #[repr(C)]
-    struct IShellItemImageFactory {
-        pub lpVtbl: *const IShellItemImageFactoryVtbl,
-    }
-
-    extern "system" {
-        fn SHCreateItemFromParsingName(
-            pszPath: *const u16,
-            pbc: *mut std::ffi::c_void,
-            riid: *const GUID,
-            ppv: *mut *mut std::ffi::c_void,
-        ) -> i32;
-    }
 
     /// 从 Windows Shell 提取缩略图 (优先读 Windows 缓存，未命中则触发 Windows 生成)
+    /// 使用 windows crate 的 IShellItemImageFactory COM 接口官方绑定，
+    /// 不再需要手写 vtable 和手动调用 AddRef/Release。
     pub fn extract_windows_shell_thumbnail(
         source_path: &Path,
         max_dimension: u32,
         target_cache_path: &Path,
     ) -> Result<PathBuf, String> {
-        let wide_path: Vec<u16> = OsStr::new(source_path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
         unsafe {
             // 初始化 COM 库
-            let _ = CoInitializeEx(std::ptr::null_mut(), COINIT_MULTITHREADED as u32);
+            let _ = CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED);
 
-            let mut factory_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hr = SHCreateItemFromParsingName(
-                wide_path.as_ptr(),
-                std::ptr::null_mut(),
-                &IID_ISHELLITEMIMAGEFACTORY,
-                &mut factory_ptr,
-            );
+            // 将 Rust Path 转换为 Windows wide string
+            let wide_path: Vec<u16> = source_path
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let path_str = PCWSTR(wide_path.as_ptr());
 
-            if hr != S_OK || factory_ptr.is_null() {
+            // 创建 IShellItemImageFactory COM 对象
+            // windows crate 通过 SHCreateItemFromParsingName 函数自动实例化
+            let factory: Result<IShellItemImageFactory, windows::core::Error> =
+                SHCreateItemFromParsingName(path_str, None);
+
+            if let Err(e) = factory {
                 CoUninitialize();
-                return Err(format!("SHCreateItemFromParsingName 失败 (HRESULT: 0x{:08X})", hr));
+                return Err(format!("SHCreateItemFromParsingName 失败: {}", e));
             }
 
-            let factory = factory_ptr as *mut IShellItemImageFactory;
+            let factory = factory.unwrap();
+
             let size = SIZE {
                 cx: max_dimension as i32,
                 cy: max_dimension as i32,
             };
 
-            let mut hbitmap: HBITMAP = 0;
+            // 1.【优先策略】尝试从 Windows 自带缓存中直接提取
+            let mut result = factory.GetImage(size, SIIGBF_INCACHEONLY);
 
-            // 1. 【优先策略】尝试从 Windows 自带缓存中直接提取 (SIIGBF_INCACHEONLY)
-            let mut hr_get = ((*(*factory).lpVtbl).GetImage)(
-                factory_ptr,
-                SIZE { cx: size.cx, cy: size.cy },
-                SIIGBF_INCACHEONLY,
-                &mut hbitmap,
-            );
-
-            // 2. 【次选策略】如果 Windows 自带缓存未命中，调用 Windows Shell 实时提取 (SIIGBF_BIGGERSIZEOK)
-            if hr_get != S_OK || hbitmap == 0 {
-                hr_get = ((*(*factory).lpVtbl).GetImage)(
-                    factory_ptr,
-                    SIZE { cx: size.cx, cy: size.cy },
-                    SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT,
-                    &mut hbitmap,
-                );
+            // 2.【次选策略】缓存未命中时，调用 Windows Shell 实时提取
+            if result.is_err() {
+                result = factory.GetImage(size, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK);
             }
 
-            // 释放 ShellItem
-            ((*(*factory).lpVtbl).Release)(factory_ptr);
+            // windows crate 的 IShellItemImageFactory 在 Drop 时自动 Release
             CoUninitialize();
 
-            if hr_get != S_OK || hbitmap == 0 {
-                return Err(format!("Windows Shell GetImage 提取失败 (0x{:08X})", hr_get));
-            }
+            let hbitmap = match result {
+                Ok(h) if !h.is_invalid() => h,
+                Ok(_) => return Err("Windows Shell 返回空位图".to_string()),
+                Err(e) => return Err(format!("Windows Shell GetImage 提取失败: {}", e)),
+            };
 
-            // 将 HBITMAP 转换并保存为 PNG 缓存
+            // 将 HBITMAP 转换为 PNG 并保存
             let save_res = convert_hbitmap_to_png(hbitmap, target_cache_path);
-            DeleteObject(hbitmap);
+            let _ = DeleteObject(hbitmap);
 
             save_res.map(|_| target_cache_path.to_path_buf())
         }
@@ -214,10 +174,10 @@ mod windows_impl {
         bi.bmiHeader.biHeight = -((height as i32)); // 负数表示从上往下的 DIB
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB as u32;
+        bi.bmiHeader.biCompression = BI_RGB.0;
 
         let mut buffer: Vec<u8> = vec![0u8; (width * height * 4) as usize];
-        let hdc = windows_sys::Win32::Graphics::Gdi::GetDC(0 as HWND);
+        let hdc = GetDC(HWND(0));
 
         let lines = GetDIBits(
             hdc,
@@ -228,7 +188,7 @@ mod windows_impl {
             &mut bi,
             DIB_RGB_COLORS,
         );
-        windows_sys::Win32::Graphics::Gdi::ReleaseDC(0 as HWND, hdc);
+        let _ = ReleaseDC(HWND(0), hdc);
 
         if lines == 0 {
             return Err("GetDIBits 拷贝位图内存失败".to_string());
