@@ -200,20 +200,22 @@ class DataService {
   /**
    * 懒加载生成资产缩略图（桌面模式）
    * 调用 Rust 后端生成缩略图并保存到数据库缓存，
-   * 返回的本地路径需通过 convertFileSrc 转为可展示 URL
+   * 通过 Rust 命令读取文件并以 base64 data URL 返回（绕过浏览器 file:// 安全限制）
    */
   async getAssetThumbnail(assetId: string, path: string): Promise<string | null> {
     if (getEnvironment().isDesktop) {
       this.log('getAssetThumbnail', `生成缩略图: ${path}`);
       const thumbPath = await bridge.getThumbnailViaRust(assetId, path);
       if (thumbPath) {
-        // 尝试使用 Tauri 的 convertFileSrc 将本地路径转换为可展示 URL
+        // 通过 Rust IPC 读取缩略图文件，返回 base64 data URL
+        const dataUrl = await bridge.readThumbnailBase64(thumbPath);
+        if (dataUrl) return dataUrl;
+        // 降级：尝试使用 convertFileSrc（某些环境下可用）
         try {
           const { convertFileSrc } = await import('@tauri-apps/api/core');
           return convertFileSrc(thumbPath);
         } catch {
-          // 如果 convertFileSrc 不可用（如 Vite HMR 未就绪），直接返回本地路径
-          return thumbPath;
+          return null;
         }
       }
     }

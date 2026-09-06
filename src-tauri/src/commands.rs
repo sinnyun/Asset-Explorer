@@ -305,3 +305,27 @@ pub fn validate_assets(db: State<'_, Database>) -> Result<ValidationResult, Stri
         total_checked: total,
     })
 }
+
+/// 指令 25: 读取缩略图文件并以 base64 data URL 返回（绕过浏览器 file:// 安全限制）
+#[tauri::command]
+pub fn read_thumbnail_base64(file_path: String) -> Result<String, String> {
+    let path = std::path::Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("缩略图文件不存在: {}", file_path));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("读取缩略图失败: {}", e))?;
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    // 根据文件扩展名推断 MIME 类型，默认 PNG
+    let mime = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| match e.to_lowercase().as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            _ => "image/png",
+        })
+        .unwrap_or("image/png");
+    Ok(format!("data:{};base64,{}", mime, b64))
+}

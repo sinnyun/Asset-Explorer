@@ -62,6 +62,7 @@ fn main() {
         // 机制 2：启动时自动校验资产有效性并挂载文件监听器
         // ====================================================================
         .setup(move |app| {
+            println!("[Startup] Tauri 应用启动中，开始初始化校验与监控...");
             // 启动时自动校验：删除数据库中文件已不存在的资产记录
             match db_for_setup.validate_assets() {
                 Ok((total, deleted)) => {
@@ -77,6 +78,7 @@ fn main() {
             // 启动文件监控器，监听已监控文件夹的变更
             let app_handle = app.handle().clone();
             watcher::start_file_watcher(app_handle, Arc::new(db_for_setup.clone()));
+            println!("[Startup] Tauri 初始化完成，开始监听窗口事件...");
             Ok(())
         })
         // ====================================================================
@@ -116,7 +118,8 @@ fn main() {
             get_storage_stats,
             migrate_data_storage,
             restart_application,
-            validate_assets
+            validate_assets,
+            read_thumbnail_base64
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 桌面客户端失败");

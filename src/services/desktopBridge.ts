@@ -116,6 +116,15 @@ export async function getThumbnailViaRust(assetId: string, path: string, maxDime
   return await callTauri<string>('get_thumbnail', { assetId, path, maxDimension });
 }
 
+/**
+ * 读取缩略图文件并以 base64 data URL 返回（绕过浏览器 file:// 安全限制）
+ * @param filePath 缩略图本地文件路径
+ * @returns base64 data URL，可直接用于 <img src="..." />
+ */
+export async function readThumbnailBase64(filePath: string): Promise<string | null> {
+  return await callTauri<string>('read_thumbnail_base64', { filePath });
+}
+
 export async function createFolderViaRust(folder: Folder): Promise<boolean> {
   const res = await callTauri<void>('create_folder', { folder });
   return res !== null;
