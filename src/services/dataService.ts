@@ -398,7 +398,7 @@ class DataService {
 
     if (env.isDesktop) {
       const tag = typeof idOrItem === 'string' ? { id: idOrItem, ...updates } as Tag : idOrItem;
-      bridge.updateTagViaRust(tag).catch(console.error);
+      bridge.updateTagViaRust(tag.id, tag).catch(console.error);
       return;
     }
 
@@ -451,7 +451,7 @@ class DataService {
 
     if (env.isDesktop) {
       const col = typeof idOrItem === 'string' ? { id: idOrItem, ...updates } as Collection : idOrItem;
-      bridge.updateCollectionViaRust(col).catch(console.error);
+      bridge.updateCollectionViaRust(col.id, col).catch(console.error);
       return;
     }
 

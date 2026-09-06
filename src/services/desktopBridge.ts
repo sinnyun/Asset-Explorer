@@ -150,8 +150,8 @@ export async function createTagViaRust(tag: Tag): Promise<boolean> {
   return res !== null;
 }
 
-export async function updateTagViaRust(tag: Tag): Promise<boolean> {
-  const res = await callTauri<void>('update_tag', { tag });
+export async function updateTagViaRust(id: string, tag: Tag): Promise<boolean> {
+  const res = await callTauri<void>('update_tag', { id, tag });
   return res !== null;
 }
 
@@ -165,8 +165,8 @@ export async function createCollectionViaRust(collection: Collection): Promise<b
   return res !== null;
 }
 
-export async function updateCollectionViaRust(collection: Collection): Promise<boolean> {
-  const res = await callTauri<void>('update_collection', { collection });
+export async function updateCollectionViaRust(id: string, collection: Collection): Promise<boolean> {
+  const res = await callTauri<void>('update_collection', { id, collection });
   return res !== null;
 }
 

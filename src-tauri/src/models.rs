@@ -49,6 +49,9 @@ pub struct Tag {
     pub id: String,
     pub name: String,
     pub color: String,
+    pub description: Option<String>,
+    #[serde(rename = "isPinned")]
+    pub is_pinned: Option<bool>,
     pub count: Option<usize>,
 }
 
@@ -57,6 +60,10 @@ pub struct Tag {
 pub struct Collection {
     pub id: String,
     pub name: String,
+    pub color: Option<String>,
+    pub description: Option<String>,
+    #[serde(rename = "isPinned")]
+    pub is_pinned: Option<bool>,
     pub count: Option<usize>,
 }
 

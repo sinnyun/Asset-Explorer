@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { SmartFolder, SmartFolderRule, Asset, Tag, Collection } from '../../types';
 import { formatBytes, cn } from '../../lib/utils';
+import { ThumbnailImage } from '../ThumbnailImage';
 
 interface SmartFolderPropertiesProps {
   smartFolder: SmartFolder;
@@ -383,17 +384,12 @@ export function SmartFolderProperties({
                   className="aspect-square bg-[#121212] border border-neutral-800 rounded overflow-hidden relative group"
                   title={asset.name}
                 >
-                  {asset.thumbnailUrl ? (
-                    <img 
-                      src={asset.thumbnailUrl} 
-                      alt={asset.name} 
-                      className="w-full h-full object-cover" 
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-neutral-600">
-                      <ImageIcon size={18} />
-                    </div>
-                  )}
+                  <ThumbnailImage
+                    asset={asset}
+                    className="w-full h-full object-cover"
+                    fallbackIcon={<ImageIcon size={18} className="text-neutral-600" />}
+                    loading="lazy"
+                  />
                   <div className="absolute inset-x-0 bottom-0 bg-black/70 p-0.5 text-[9px] text-neutral-300 truncate text-center opacity-0 group-hover:opacity-100 transition-opacity">
                     {asset.name}
                   </div>

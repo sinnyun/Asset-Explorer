@@ -108,6 +108,15 @@ pub async fn rename_folder(db: State<'_, Database>, id: String, new_name: String
         .map_err(|e| e.to_string())?
 }
 
+/// 指令 7b: 后端数据库更新文件夹完整属性
+#[tauri::command]
+pub async fn update_folder(db: State<'_, Database>, folder: Folder) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.update_folder(&folder))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 指令 8: 后端数据库删除文件夹
 #[tauri::command]
 pub async fn delete_folder(db: State<'_, Database>, id: String) -> Result<(), String> {
@@ -126,6 +135,15 @@ pub async fn create_tag(db: State<'_, Database>, tag: Tag) -> Result<(), String>
         .map_err(|e| e.to_string())?
 }
 
+/// 指令 9b: 后端数据库更新标签
+#[tauri::command]
+pub async fn update_tag(db: State<'_, Database>, id: String, tag: Tag) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.update_tag(&id, &tag))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 指令 10: 后端数据库删除标签
 #[tauri::command]
 pub async fn delete_tag(db: State<'_, Database>, id: String) -> Result<(), String> {
@@ -140,6 +158,15 @@ pub async fn delete_tag(db: State<'_, Database>, id: String) -> Result<(), Strin
 pub async fn create_collection(db: State<'_, Database>, collection: Collection) -> Result<(), String> {
     let db = db.inner().clone();
     tokio::task::spawn_blocking(move || db.insert_collection(&collection))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 指令 11b: 后端数据库更新集合
+#[tauri::command]
+pub async fn update_collection(db: State<'_, Database>, id: String, collection: Collection) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.update_collection(&id, &collection))
         .await
         .map_err(|e| e.to_string())?
 }

@@ -786,7 +786,7 @@ export default function App() {
     setCreateEntityModal({ isOpen: true, type: 'collection' });
   };
 
-  const handleConfirmCreateEntity = (data: { name: string; color: string; description?: string; isPinned: boolean }) => {
+  const handleConfirmCreateEntity = async (data: { name: string; color: string; description?: string; isPinned: boolean }) => {
     if (createEntityModal.type === 'tag') {
       const newTag: Tag = {
         id: `t_${Date.now()}`,
@@ -795,7 +795,7 @@ export default function App() {
         description: data.description,
         isPinned: data.isPinned
       };
-      dataService.createTag(newTag);
+      await dataService.createTag(newTag);
       setState(prev => ({
         ...prev,
         tags: [newTag, ...prev.tags],
@@ -814,7 +814,7 @@ export default function App() {
         description: data.description,
         isPinned: data.isPinned
       };
-      dataService.createCollection(newCol);
+      await dataService.createCollection(newCol);
       setState(prev => ({
         ...prev,
         collections: [newCol, ...prev.collections],

@@ -212,17 +212,22 @@ impl Database {
                 FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE
             );
 
-            -- 2. 标签表
+            -- 2. 标签表（含 description 和 is_pinned 字段，用于持久化前端额外属性）
             CREATE TABLE IF NOT EXISTS tags (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
-                color TEXT NOT NULL
+                color TEXT NOT NULL,
+                description TEXT DEFAULT NULL,
+                is_pinned INTEGER NOT NULL DEFAULT 0
             );
 
-            -- 3. 集合表
+            -- 3. 集合表（含 color、description 和 is_pinned 字段，用于持久化前端额外属性）
             CREATE TABLE IF NOT EXISTS collections (
                 id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE
+                name TEXT NOT NULL UNIQUE,
+                color TEXT DEFAULT NULL,
+                description TEXT DEFAULT NULL,
+                is_pinned INTEGER NOT NULL DEFAULT 0
             );
 
             -- 4. 资产主表
@@ -283,6 +288,24 @@ impl Database {
             ",
         )
         .map_err(|e| format!("数据库表结构初始化失败: {}", e))?;
+
+        // 迁移旧数据库：为 tags 表添加 description 和 is_pinned 列（如果不存在，ALTER ADD COLUMN 会静默忽略重复添加错误）
+        let _ = conn.execute_batch(
+            "ALTER TABLE tags ADD COLUMN description TEXT DEFAULT NULL;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE tags ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;",
+        );
+        // 迁移旧数据库：为 collections 表添加 color、description 和 is_pinned 列（如果不存在）
+        let _ = conn.execute_batch(
+            "ALTER TABLE collections ADD COLUMN color TEXT DEFAULT NULL;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE collections ADD COLUMN description TEXT DEFAULT NULL;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE collections ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;",
+        );
 
         Ok(())
     }
@@ -648,10 +671,26 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_folder(&self, folder: &Folder) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE folders SET name = ?1, path = ?2, parent_id = ?3, is_monitored = ?4 WHERE id = ?5",
+            params![
+                folder.name,
+                folder.path,
+                folder.parent_id,
+                folder.is_monitored as i32,
+                folder.id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn get_tags(&self) -> Result<Vec<Tag>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, color FROM tags ORDER BY name ASC")
+            .prepare("SELECT id, name, color, description, is_pinned FROM tags ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let iter = stmt
@@ -660,6 +699,8 @@ impl Database {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     color: row.get(2)?,
+                    description: row.get(3)?,
+                    is_pinned: Some(row.get::<_, i32>(4)? != 0),
                     count: None,
                 })
             })
@@ -675,8 +716,30 @@ impl Database {
     pub fn insert_tag(&self, tag: &Tag) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO tags (id, name, color) VALUES (?1, ?2, ?3)",
-            params![tag.id, tag.name, tag.color],
+            "INSERT OR REPLACE INTO tags (id, name, color, description, is_pinned) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                tag.id,
+                tag.name,
+                tag.color,
+                tag.description,
+                tag.is_pinned.unwrap_or(false) as i32
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_tag(&self, id: &str, tag: &Tag) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE tags SET name = ?1, color = ?2, description = ?3, is_pinned = ?4 WHERE id = ?5",
+            params![
+                tag.name,
+                tag.color,
+                tag.description,
+                tag.is_pinned.unwrap_or(false) as i32,
+                id,
+            ],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -692,7 +755,7 @@ impl Database {
     pub fn get_collections(&self) -> Result<Vec<Collection>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name FROM collections ORDER BY name ASC")
+            .prepare("SELECT id, name, color, description, is_pinned FROM collections ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let iter = stmt
@@ -700,6 +763,9 @@ impl Database {
                 Ok(Collection {
                     id: row.get(0)?,
                     name: row.get(1)?,
+                    color: row.get(2)?,
+                    description: row.get(3)?,
+                    is_pinned: Some(row.get::<_, i32>(4)? != 0),
                     count: None,
                 })
             })
@@ -715,8 +781,30 @@ impl Database {
     pub fn insert_collection(&self, col: &Collection) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO collections (id, name) VALUES (?1, ?2)",
-            params![col.id, col.name],
+            "INSERT OR REPLACE INTO collections (id, name, color, description, is_pinned) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                col.id,
+                col.name,
+                col.color,
+                col.description,
+                col.is_pinned.unwrap_or(false) as i32
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_collection(&self, id: &str, col: &Collection) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE collections SET name = ?1, color = ?2, description = ?3, is_pinned = ?4 WHERE id = ?5",
+            params![
+                col.name,
+                col.color,
+                col.description,
+                col.is_pinned.unwrap_or(false) as i32,
+                id,
+            ],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
