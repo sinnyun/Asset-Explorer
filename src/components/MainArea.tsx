@@ -61,20 +61,26 @@ export function MainArea({
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   // 跟踪正在加载中的资产，避免重复请求
   const [loadingThumbnails, setLoadingThumbnails] = useState<Set<string>>(new Set());
+  // 跟踪缩略图生成失败的资产（如文件路径不存在），避免反复重试
+  const [failedThumbnails, setFailedThumbnails] = useState<Set<string>>(new Set());
 
   /**
-   * 懒加载资产缩略图：仅当 asset.thumbnailUrl 为空且未开始加载时触发
+   * 懒加载资产缩略图：仅当 asset.thumbnailUrl 为空且未开始加载且未失败过时触发
    */
   const ensureThumbnail = async (asset: Asset) => {
-    if (asset.thumbnailUrl || thumbnails[asset.id] || loadingThumbnails.has(asset.id)) return;
+    if (asset.thumbnailUrl || thumbnails[asset.id] || loadingThumbnails.has(asset.id) || failedThumbnails.has(asset.id)) return;
     setLoadingThumbnails(prev => new Set(prev).add(asset.id));
     try {
       const url = await dataService.getAssetThumbnail(asset.id, asset.path);
       if (url) {
         setThumbnails(prev => ({ ...prev, [asset.id]: url }));
+      } else {
+        // 返回 null 说明文件不存在或生成失败，记录到失败集合避免重复尝试
+        setFailedThumbnails(prev => new Set(prev).add(asset.id));
       }
     } catch (err) {
       console.warn(`[MainArea] 缩略图生成失败: ${asset.path}`, err);
+      setFailedThumbnails(prev => new Set(prev).add(asset.id));
     } finally {
       setLoadingThumbnails(prev => {
         const next = new Set(prev);
