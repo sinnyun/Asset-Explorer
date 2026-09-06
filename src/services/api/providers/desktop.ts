@@ -45,11 +45,7 @@ interface RustScanPayload {
 /** 检测是否为 Tauri 桌面环境 */
 export function isTauriDesktop(): boolean {
   if (typeof window === 'undefined') return false;
-  return (
-    '__TAURI__' in window ||
-    '__TAURI_INTERNALS__' in window ||
-    (window as any).__TAURI_IPC__ !== undefined
-  );
+  return '__TAURI_INTERNALS__' in window;
 }
 
 /** 封装安全的 Tauri invoke 调用 */

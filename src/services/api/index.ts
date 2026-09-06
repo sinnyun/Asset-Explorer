@@ -38,11 +38,7 @@ import { webProvider } from './providers/web';
  */
 function detectDesktop(): boolean {
   if (typeof window === 'undefined') return false;
-  return (
-    '__TAURI__' in window ||
-    '__TAURI_INTERNALS__' in window ||
-    (window as any).__TAURI_IPC__ !== undefined
-  );
+  return '__TAURI_INTERNALS__' in window;
 }
 
 /** 获取当前环境的 API Provider */

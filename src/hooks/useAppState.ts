@@ -9,7 +9,7 @@ import { dataService } from '../services/dataService';
 /**
  * 初始状态懒初始化：始终使用空数据，不依赖环境检测
  *
- * 原因：`runtime.isDesktop`（检查 window.__TAURI__）在 React 初始化时可能尚未注入，
+ * 原因：`runtime.isDesktop`（检查 __TAURI_INTERNALS__）在 React 初始化时可能尚未注入，
  * 导致第一帧渲染错误地使用了 mock 数据（C:/Workspace 路径）。
  * 而 C:/Workspace 这些路径只应存在于 Web 开发环境的模拟数据中，不应出现在桌面模式。
  *
