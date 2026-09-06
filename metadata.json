@@ -1,0 +1,6 @@
+{
+  "name": "Asset Explorer",
+  "description": "A professional resource manager prototype with tags, smart folders, and centralized asset viewing, inspired by Eagle and Blender.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

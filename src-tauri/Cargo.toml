@@ -1,0 +1,67 @@
+[package]
+name = "eagle-asset-hub"
+version = "0.1.0"
+description = "High-Performance Local Desktop Asset Hub (Rust + Tauri)"
+authors = ["Asset Hub Team"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+# Tauri v2 Core
+tauri = { version = "2.0", features = [] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-dialog = "2.0"
+tauri-plugin-fs = "2.0"
+
+# Serialization & JSON (Industry standard)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# High-Performance Concurrency & Thread Pooling
+rayon = "1.10"
+tokio = { version = "1.38", features = ["full"] }
+
+# Directory Traversal & Fast File Indexing
+walkdir = "2.5"
+
+# File Monitoring & Realtime Watcher
+notify = "6.1"
+
+# Image Processing & Thumbnail Generation
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+
+# MIME Type & File Type Inference
+infer = "0.16"
+
+# Hash Computation (Quick Duplicate Detection & Cache Keys)
+sha2 = "0.10"
+hex = "0.4"
+
+# Safe Synchronized State Containers
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+
+# Embedded High-Performance Local Database (SQLite with zero external dependencies)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
