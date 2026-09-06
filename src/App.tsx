@@ -21,6 +21,7 @@ import { useNavigationActions } from './hooks/useNavigationActions';
 import { useEntityActions } from './hooks/useEntityActions';
 import { useContextMenuHandlers } from './hooks/useContextMenuHandlers';
 import { useMiscActions } from './hooks/useMiscActions';
+import { dataService } from './services/dataService';
 import { handleConfirmAddAndScan as scanAndAddFolder } from './hooks/useFolderScan';
 import type { Asset } from './types';
 
@@ -70,6 +71,23 @@ export default function App() {
     handleConfirmCreateEntity, handleBulkAddTags, handleBulkAddCollections,
     handleBulkDelete, handleUpdateTheme, handleRelocatePaths,
   } = useMiscActions(createEntityModal, setState, state);
+
+  // 单资产标签/集合关联编辑（右侧详情面板底部）
+  const updateAssetTags = (assetId: string, tagIds: string[]) => {
+    setState(prev => ({
+      ...prev,
+      assets: prev.assets.map(a => a.id === assetId ? { ...a, tags: tagIds } : a)
+    }));
+    dataService.syncAssetTags(assetId, tagIds).catch(console.error);
+  };
+
+  const updateAssetCollections = (assetId: string, collectionIds: string[]) => {
+    setState(prev => ({
+      ...prev,
+      assets: prev.assets.map(a => a.id === assetId ? { ...a, collections: collectionIds } : a)
+    }));
+    dataService.syncAssetCollections(assetId, collectionIds).catch(console.error);
+  };
 
   // 右键菜单操作
   const {
@@ -172,6 +190,8 @@ export default function App() {
         onDeleteFolder={handleDeleteFolder}
         onMoveFolder={handleMoveFolder}
         onTogglePinFolder={handleTogglePinFolder}
+        onUpdateAssetTags={updateAssetTags}
+        onUpdateAssetCollections={updateAssetCollections}
       />
       
       {contextMenu && (
