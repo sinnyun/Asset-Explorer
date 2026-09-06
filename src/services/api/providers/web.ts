@@ -198,6 +198,48 @@ class WebApiProvider implements ApiProvider {
     });
   }
 
+  async syncAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    await apiRequest(`/api/assets/${assetId}/tags`, {
+      method: 'PUT',
+      body: JSON.stringify({ tagIds }),
+    });
+  }
+
+  async syncAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    await apiRequest(`/api/assets/${assetId}/collections`, {
+      method: 'PUT',
+      body: JSON.stringify({ collectionIds }),
+    });
+  }
+
+  async syncManyAssetTags(assetIds: string[], tagIds: string[]): Promise<void> {
+    await apiRequest('/api/assets/batch-tags', {
+      method: 'POST',
+      body: JSON.stringify({ assetIds, tagIds }),
+    });
+  }
+
+  async syncManyAssetCollections(assetIds: string[], collectionIds: string[]): Promise<void> {
+    await apiRequest('/api/assets/batch-collections', {
+      method: 'POST',
+      body: JSON.stringify({ assetIds, collectionIds }),
+    });
+  }
+
+  async removeAssetTags(assetId: string, tagIds: string[]): Promise<void> {
+    await apiRequest(`/api/assets/${assetId}/tags`, {
+      method: 'DELETE',
+      body: JSON.stringify({ tagIds }),
+    });
+  }
+
+  async removeAssetCollections(assetId: string, collectionIds: string[]): Promise<void> {
+    await apiRequest(`/api/assets/${assetId}/collections`, {
+      method: 'DELETE',
+      body: JSON.stringify({ collectionIds }),
+    });
+  }
+
   // ------------------------------------------------------------------------
   // 文件夹 CRUD
   // ------------------------------------------------------------------------

@@ -99,6 +99,60 @@ pub async fn delete_assets(db: State<'_, Database>, ids: Vec<String>) -> Result<
         .map_err(|e| e.to_string())?
 }
 
+/// 指令 5b: 同步设置单个资产的标签关联
+#[tauri::command]
+pub async fn sync_asset_tags(db: State<'_, Database>, asset_id: String, tag_ids: Vec<String>) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.sync_asset_tags(&asset_id, &tag_ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 指令 5c: 同步设置单个资产的集合关联
+#[tauri::command]
+pub async fn sync_asset_collections(db: State<'_, Database>, asset_id: String, collection_ids: Vec<String>) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.sync_asset_collections(&asset_id, &collection_ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 指令 5d: 批量同步多个资产的标签关联
+#[tauri::command]
+pub async fn sync_many_asset_tags(db: State<'_, Database>, asset_ids: Vec<String>, tag_ids: Vec<String>) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.sync_many_asset_tags(&asset_ids, &tag_ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 指令 5e: 批量同步多个资产的集合关联
+#[tauri::command]
+pub async fn sync_many_asset_collections(db: State<'_, Database>, asset_ids: Vec<String>, collection_ids: Vec<String>) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.sync_many_asset_collections(&asset_ids, &collection_ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 指令 5f: 从资产移除指定标签
+#[tauri::command]
+pub async fn remove_asset_tags(db: State<'_, Database>, asset_id: String, tag_ids: Vec<String>) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.remove_asset_tags(&asset_id, &tag_ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 指令 5g: 从资产移除指定集合
+#[tauri::command]
+pub async fn remove_asset_collections(db: State<'_, Database>, asset_id: String, collection_ids: Vec<String>) -> Result<(), String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.remove_asset_collections(&asset_id, &collection_ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 指令 6: 后端数据库创建文件夹
 #[tauri::command]
 pub async fn create_folder(db: State<'_, Database>, folder: Folder) -> Result<(), String> {

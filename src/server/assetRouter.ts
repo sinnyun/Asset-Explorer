@@ -1,7 +1,7 @@
 import express from 'express';
 import { db } from '../db/index.ts';
 import { assets, assetTags, assetCollections } from '../db/schema.ts';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, inArray } from 'drizzle-orm';
 import { requireAuth, AuthRequest } from '../middleware/auth.ts';
 
 export const assetRouter = express.Router();
@@ -67,5 +67,143 @@ assetRouter.post("/assets/batch-delete", requireAuth, async (req: AuthRequest, r
   } catch (error: any) {
     console.error("[API] 批量删除资产失败:", error);
     res.status(500).json({ error: error.message || "Failed to delete assets" });
+  }
+});
+
+/** 同步设置单个资产的标签关联（全量替换） */
+assetRouter.put("/assets/:id/tags", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const id = paramId(req);
+    const { tagIds } = req.body;
+    if (!Array.isArray(tagIds)) {
+      return res.status(400).json({ error: "tagIds must be an array" });
+    }
+
+    // Verify asset belongs to user
+    const assetRows = await db.select().from(assets)
+      .where(and(eq(assets.id, id), eq(assets.userId, userId)));
+    if (assetRows.length === 0) {
+      return res.status(404).json({ error: "Asset not found" });
+    }
+
+    // Delete all existing associations then insert new ones
+    await db.delete(assetTags).where(eq(assetTags.assetId, id));
+    for (const tagId of tagIds) {
+      await db.insert(assetTags).values({ assetId: id, tagId }).onConflictDoNothing();
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[API] 同步资产标签失败:", error);
+    res.status(500).json({ error: error.message || "Failed to sync asset tags" });
+  }
+});
+
+/** 同步设置单个资产的集合关联（全量替换） */
+assetRouter.put("/assets/:id/collections", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const id = paramId(req);
+    const { collectionIds } = req.body;
+    if (!Array.isArray(collectionIds)) {
+      return res.status(400).json({ error: "collectionIds must be an array" });
+    }
+
+    const assetRows = await db.select().from(assets)
+      .where(and(eq(assets.id, id), eq(assets.userId, userId)));
+    if (assetRows.length === 0) {
+      return res.status(404).json({ error: "Asset not found" });
+    }
+
+    await db.delete(assetCollections).where(eq(assetCollections.assetId, id));
+    for (const colId of collectionIds) {
+      await db.insert(assetCollections).values({ assetId: id, collectionId: colId }).onConflictDoNothing();
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[API] 同步资产集合失败:", error);
+    res.status(500).json({ error: error.message || "Failed to sync asset collections" });
+  }
+});
+
+/** 批量添加标签到多个资产 */
+assetRouter.post("/assets/batch-tags", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const { assetIds, tagIds } = req.body;
+    if (!Array.isArray(assetIds) || !Array.isArray(tagIds) || assetIds.length === 0) {
+      return res.status(400).json({ error: "assetIds and tagIds must be non-empty arrays" });
+    }
+
+    for (const assetId of assetIds) {
+      for (const tagId of tagIds) {
+        await db.insert(assetTags).values({ assetId, tagId }).onConflictDoNothing();
+      }
+    }
+    res.json({ success: true, added: assetIds.length * tagIds.length });
+  } catch (error: any) {
+    console.error("[API] 批量添加资产标签失败:", error);
+    res.status(500).json({ error: error.message || "Failed to batch add asset tags" });
+  }
+});
+
+/** 批量添加集合到多个资产 */
+assetRouter.post("/assets/batch-collections", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const { assetIds, collectionIds } = req.body;
+    if (!Array.isArray(assetIds) || !Array.isArray(collectionIds) || assetIds.length === 0) {
+      return res.status(400).json({ error: "assetIds and collectionIds must be non-empty arrays" });
+    }
+
+    for (const assetId of assetIds) {
+      for (const colId of collectionIds) {
+        await db.insert(assetCollections).values({ assetId, collectionId: colId }).onConflictDoNothing();
+      }
+    }
+    res.json({ success: true, added: assetIds.length * collectionIds.length });
+  } catch (error: any) {
+    console.error("[API] 批量添加资产集合失败:", error);
+    res.status(500).json({ error: error.message || "Failed to batch add asset collections" });
+  }
+});
+
+/** 从资产移除标签 */
+assetRouter.delete("/assets/:id/tags", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const id = paramId(req);
+    const { tagIds } = req.body;
+    if (!Array.isArray(tagIds)) {
+      return res.status(400).json({ error: "tagIds must be an array" });
+    }
+
+    for (const tagId of tagIds) {
+      await db.delete(assetTags).where(and(eq(assetTags.assetId, id), eq(assetTags.tagId, tagId)));
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[API] 移除资产标签失败:", error);
+    res.status(500).json({ error: error.message || "Failed to remove asset tags" });
+  }
+});
+
+/** 从资产移除集合 */
+assetRouter.delete("/assets/:id/collections", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const id = paramId(req);
+    const { collectionIds } = req.body;
+    if (!Array.isArray(collectionIds)) {
+      return res.status(400).json({ error: "collectionIds must be an array" });
+    }
+
+    for (const colId of collectionIds) {
+      await db.delete(assetCollections).where(and(eq(assetCollections.assetId, id), eq(assetCollections.collectionId, colId)));
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[API] 移除资产集合失败:", error);
+    res.status(500).json({ error: error.message || "Failed to remove asset collections" });
   }
 });
