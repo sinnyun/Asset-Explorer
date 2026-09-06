@@ -557,16 +557,27 @@ impl Database {
         let assets = self.get_all_assets()?;
         let total = assets.len();
         let mut paths_to_delete: Vec<String> = Vec::new();
+        let mut sample_paths: Vec<String> = Vec::new(); // 记录前 5 个路径用于调试
 
-        for asset in &assets {
+        for (i, asset) in assets.iter().enumerate() {
             let path = std::path::Path::new(&asset.path);
-            if !path.exists() {
+            let exists = path.exists();
+            if i < 5 {
+                sample_paths.push(format!("{} (存在: {})", asset.path, exists));
+            }
+            if !exists {
                 paths_to_delete.push(asset.path.clone());
             }
         }
 
+        // 输出前 5 个资产路径的检查结果，方便排查为什么 C:/Workspace 等路径未被清理
+        println!("[Validation] 启动资产校验: 共检查 {} 个资产, 删除 {} 个无效路径, 前 5 个样本路径:", total, paths_to_delete.len());
+        for s in &sample_paths {
+            println!("[Validation]   路径: {}", s);
+        }
+
         let deleted = self.delete_assets_by_paths(&paths_to_delete)?;
-        println!("[Validation] 启动资产校验: 共检查 {} 个资产, 删除 {} 个无效路径", total, deleted);
+        println!("[Validation] 数据库实际删除记录数: {}", deleted);
         Ok((total, deleted))
     }
 

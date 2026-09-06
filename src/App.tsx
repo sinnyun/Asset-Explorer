@@ -23,27 +23,62 @@ import { dataService } from './services/dataService';
 
 export default function App() {
   const [addMonitoredModalOpen, setAddMonitoredModalOpen] = useState(false);
-  const [state, setState] = useState<AssetState>({
-    assets: mockAssets,
-    folders: mockFolders,
-    tags: mockTags,
-    collections: mockCollections,
-    selectedItems: [],
-    activeFolderId: null,
-    activeSmartFolderId: 'sf_all',
-    activeTagId: null,
-    activeCollectionId: null,
-    activeSidebarTab: 'smart',
-    expandedFolderIds: ['workspace', 'proj1', 'assets', 'textures'],
-    collapsedGroupIds: [],
-    searchQuery: '',
-    viewMode: 'grid',
-    groupByFolder: true,
-    includeSubfolders: true,
-    customSmartFolders: [],
-    sortOption: 'name_asc',
-    theme: 'dark'
-  });
+
+  /**
+   * 初始状态懒初始化：桌面环境不使用模拟数据（C:/Workspace 路径仅用于 Web 开发环境）
+   * 桌面模式下，数据由 loadWorkspace 从 Rust SQLite 加载（实际监视文件夹的路径）
+   * Web 模式下，使用模拟数据作开发预览
+   * 这样首次渲染就不会出现 C:/Workspace 等不应存在的路径
+   */
+  const getInitialState = (): AssetState => {
+    const isDesktop = typeof window !== 'undefined' && typeof (window as any).__TAURI__ !== 'undefined';
+    if (isDesktop) {
+      return {
+        assets: [],
+        folders: [],
+        tags: [],
+        collections: [],
+        selectedItems: [],
+        activeFolderId: null,
+        activeSmartFolderId: 'sf_all',
+        activeTagId: null,
+        activeCollectionId: null,
+        activeSidebarTab: 'smart',
+        expandedFolderIds: [],
+        collapsedGroupIds: [],
+        searchQuery: '',
+        viewMode: 'grid',
+        groupByFolder: true,
+        includeSubfolders: true,
+        customSmartFolders: [],
+        sortOption: 'name_asc',
+        theme: 'dark'
+      };
+    }
+    return {
+      assets: mockAssets,
+      folders: mockFolders,
+      tags: mockTags,
+      collections: mockCollections,
+      selectedItems: [],
+      activeFolderId: null,
+      activeSmartFolderId: 'sf_all',
+      activeTagId: null,
+      activeCollectionId: null,
+      activeSidebarTab: 'smart',
+      expandedFolderIds: ['workspace', 'proj1', 'assets', 'textures'],
+      collapsedGroupIds: [],
+      searchQuery: '',
+      viewMode: 'grid',
+      groupByFolder: true,
+      includeSubfolders: true,
+      customSmartFolders: [],
+      sortOption: 'name_asc',
+      theme: 'dark'
+    };
+  };
+
+  const [state, setState] = useState<AssetState>(getInitialState);
 
   // 1. 初始化从后端 SQLite 异步加载全量数据 (非阻塞)
   useEffect(() => {
