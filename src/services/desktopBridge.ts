@@ -31,16 +31,23 @@ export async function pickDirectoryViaDialog(): Promise<string | null> {
 
 /**
  * 封装安全的 Tauri invoke 调用 (异步非阻塞)
+ * 日志分级：区分动态导入失败 vs IPC 调用失败
  */
 async function callTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
   if (!isTauriDesktop()) {
+    console.warn(`[DesktopBridge] 非桌面环境，跳过 Rust 命令: ${cmd}`);
     return null;
   }
   try {
     const { invoke } = await import('@tauri-apps/api/core');
     return await invoke<T>(cmd, args);
-  } catch (err) {
-    console.warn(`[DesktopBridge] 调用 Rust 命令 ${cmd} 失败:`, err);
+  } catch (err: any) {
+    // 区分动态导入错误和 IPC 调用错误
+    if (err instanceof Error && (err.message?.includes('import') || err.message?.includes('module'))) {
+      console.warn(`[DesktopBridge] 动态导入 @tauri-apps/api/core 失败（可能 Vite HMR 未就绪）:`, err.message);
+    } else {
+      console.warn(`[DesktopBridge] 调用 Rust 命令 ${cmd} 失败:`, err);
+    }
     return null;
   }
 }

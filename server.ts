@@ -544,8 +544,13 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== "production") {
     // 开发模式：使用 Vite 中间件提供前端热更新
+    // 显式指定 HMR 端口为 3001，避免与默认端口 24678 冲突
+    // （之前进程退出后端口 24678 可能残留占用，导致 HMR WebSocket 无法启动）
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: { port: 3001 },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);

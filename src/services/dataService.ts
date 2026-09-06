@@ -28,6 +28,8 @@ class DataService {
   /**
    * 异步加载工作区数据
    * 优先级：桌面 Rust SQLite > Web API PostgreSQL > 本地模拟数据
+   * 重试机制：桌面模式首次失败后，等待 500ms 重试一次
+   * （解决 Vite HMR 初始化期间动态 import @tauri-apps/api/core 可能失败的问题）
    */
   async loadWorkspace(): Promise<Partial<AssetState>> {
     const env = getEnvironment();
@@ -37,19 +39,46 @@ class DataService {
     // ==================================================================
     if (env.isDesktop) {
       this.log('loadWorkspace', '使用桌面 Rust SQLite 后端');
-      try {
-        const payload = await bridge.loadWorkspaceFromRustDb();
-        if (payload && (payload.folders.length > 0 || payload.assets.length > 0)) {
+      // 尝试加载，最多重试 2 次
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const payload = await bridge.loadWorkspaceFromRustDb();
+          if (payload === null) {
+            // callTauri 返回 null → 通常是 @tauri-apps/api/core 导入失败或 IPC 未就绪
+            if (attempt < 2) {
+              console.warn(`[DataService] Rust IPC 返回空（第 ${attempt} 次），等待 500ms 后重试...`);
+              await new Promise(r => setTimeout(r, 500));
+              continue;
+            }
+            console.warn('[DataService] Rust IPC 重试耗尽，降级到 Web API 或模拟数据');
+            break;
+          }
+          if (payload.folders.length > 0 || payload.assets.length > 0) {
+            this.log('loadWorkspace', `成功加载 ${payload.assets.length} 个资产`);
+            return {
+              folders: payload.folders,
+              tags: payload.tags,
+              collections: payload.collections,
+              customSmartFolders: payload.smart_folders,
+              assets: payload.assets,
+            };
+          }
+          // 数据库为空（首次启动），空数据库也是有效状态，直接返回空数据
+          this.log('loadWorkspace', 'SQLite 数据库为空（首次启动），返回空数据');
           return {
-            folders: payload.folders,
-            tags: payload.tags,
-            collections: payload.collections,
-            customSmartFolders: payload.smart_folders,
-            assets: payload.assets,
+            folders: [],
+            tags: [],
+            collections: [],
+            customSmartFolders: [],
+            assets: [],
           };
+        } catch (err) {
+          console.warn(`[DataService] 从 Rust SQLite 加载失败（第 ${attempt} 次）:`, err);
+          if (attempt < 2) {
+            await new Promise(r => setTimeout(r, 500));
+            continue;
+          }
         }
-      } catch (err) {
-        console.warn('[DataService] 从 Rust SQLite 加载失败，采用默认数据:', err);
       }
     }
 
