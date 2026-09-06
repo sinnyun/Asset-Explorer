@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 import { Asset, Folder, SelectionItem } from '../types';
 import { cn, formatBytes } from '../lib/utils';
-import { openInWindowsExplorer } from '../services/desktopBridge';
 import { ThumbnailImage } from './ThumbnailImage';
 
 interface MonitoredSplitViewProps {

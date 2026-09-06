@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { Folder, Asset, Tag, Collection } from '../../types';
 import { formatBytes, cn } from '../../lib/utils';
-import { openInWindowsExplorer } from '../../services/desktopBridge';
+import { apiClient } from '../../services/api';
 
 interface FolderPropertiesProps {
   folder: Folder;
@@ -52,7 +52,7 @@ export function FolderProperties({
   };
 
   const handleRevealExplorer = () => {
-    openInWindowsExplorer(folder.path);
+    apiClient.openInExplorer(folder.path);
   };
 
   const handleDelete = () => {

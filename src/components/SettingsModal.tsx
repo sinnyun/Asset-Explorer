@@ -5,7 +5,6 @@ import {
 } from 'lucide-react';
 import { formatBytes } from '../lib/utils';
 import { dataService } from '../services/dataService';
-import { isTauriDesktop } from '../services/desktopBridge';
 
 interface SettingsModalProps {
   isOpen: boolean;
