@@ -380,21 +380,23 @@ export function MainArea({
                             {asset.type}
                           </div>
 
-                          {/* 缩略图懒加载：优先使用 asset.thumbnailUrl（数据库缓存），
-                              未命中时调用 ensureThumbnail 触发 Rust 后端生成 */}
+                          {/* 缩略图懒加载：只使用 base64 data URL，绝不使用原始文件路径
+                               asset.thumbnailUrl 是数据库中的原始文件路径（如 D:/.../xxx.png），
+                               浏览器禁止加载 file:/// 资源。必须通过 ensureThumbnail 调用 Rust IPC
+                               readThumbnailBase64 转换为 base64 后存入 thumbnails 状态再展示。 */}
                           {(() => {
-                            const thumbUrl = asset.thumbnailUrl || thumbnails[asset.id];
-                            if (thumbUrl) {
+                            const base64Url = thumbnails[asset.id];
+                            if (base64Url) {
                               return (
                                 <img 
-                                  src={thumbUrl} 
+                                  src={base64Url} 
                                   alt={asset.name} 
                                   className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                                   loading="lazy"
                                 />
                               );
                             }
-                            // 异步触发懒加载（非阻塞），由 ensureThumbnail 内部防重
+                            // 异步触发懒加载：已有 thumbnailUrl 则读取缓存，否则生成新缩略图
                             ensureThumbnail(asset);
                             return (
                               <div className="transform transition-transform duration-300 group-hover:scale-110">

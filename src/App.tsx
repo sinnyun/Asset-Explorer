@@ -13,7 +13,7 @@ import { AddMonitoredFolderModal } from './components/AddMonitoredFolderModal';
 import { CreateEntityModal } from './components/CreateEntityModal';
 import { RenameModal } from './components/RenameModal';
 import { AssetState, SidebarTab, SmartFolder, SortOption, ThemeMode, Tag, Collection, Folder as FolderType } from './types';
-import { mockAssets, mockFolders, mockTags, mockCollections, smartFolders } from './data';
+import { smartFolders } from './data';
 import { 
   Edit2, Trash2, ExternalLink, FolderOpen, Pin, ArrowUp, ArrowDown, Info,
   LayoutGrid, List, CheckSquare, Plus, RefreshCw, FolderPlus, Layers, Tag as TagIcon 
@@ -25,58 +25,38 @@ export default function App() {
   const [addMonitoredModalOpen, setAddMonitoredModalOpen] = useState(false);
 
   /**
-   * 初始状态懒初始化：桌面环境不使用模拟数据（C:/Workspace 路径仅用于 Web 开发环境）
-   * 桌面模式下，数据由 loadWorkspace 从 Rust SQLite 加载（实际监视文件夹的路径）
-   * Web 模式下，使用模拟数据作开发预览
-   * 这样首次渲染就不会出现 C:/Workspace 等不应存在的路径
+   * 初始状态懒初始化：始终使用空数据，不依赖环境检测
+   *
+   * 原因：`isTauriDesktop()`（检查 window.__TAURI__）在 React 初始化时可能尚未注入，
+   * 导致第一帧渲染错误地使用了 mock 数据（C:/Workspace 路径）。
+   * 而 C:/Workspace 这些路径只应存在于 Web 开发环境的模拟数据中，不应出现在桌面模式。
+   *
+   * 数据加载由 loadWorkspace 在 useEffect 中异步完成：
+   * - 桌面模式 → Rust SQLite（实际监视文件夹路径，如 D:\桌面文件夹\测试\...）
+   * - Web 模式 → Web API / 降级到 mock 数据
+   * 无论哪种模式，首次渲染后 loadWorkspace 会立即填充数据，用户不会感知到空白。
    */
-  const getInitialState = (): AssetState => {
-    const isDesktop = typeof window !== 'undefined' && typeof (window as any).__TAURI__ !== 'undefined';
-    if (isDesktop) {
-      return {
-        assets: [],
-        folders: [],
-        tags: [],
-        collections: [],
-        selectedItems: [],
-        activeFolderId: null,
-        activeSmartFolderId: 'sf_all',
-        activeTagId: null,
-        activeCollectionId: null,
-        activeSidebarTab: 'smart',
-        expandedFolderIds: [],
-        collapsedGroupIds: [],
-        searchQuery: '',
-        viewMode: 'grid',
-        groupByFolder: true,
-        includeSubfolders: true,
-        customSmartFolders: [],
-        sortOption: 'name_asc',
-        theme: 'dark'
-      };
-    }
-    return {
-      assets: mockAssets,
-      folders: mockFolders,
-      tags: mockTags,
-      collections: mockCollections,
-      selectedItems: [],
-      activeFolderId: null,
-      activeSmartFolderId: 'sf_all',
-      activeTagId: null,
-      activeCollectionId: null,
-      activeSidebarTab: 'smart',
-      expandedFolderIds: ['workspace', 'proj1', 'assets', 'textures'],
-      collapsedGroupIds: [],
-      searchQuery: '',
-      viewMode: 'grid',
-      groupByFolder: true,
-      includeSubfolders: true,
-      customSmartFolders: [],
-      sortOption: 'name_asc',
-      theme: 'dark'
-    };
-  };
+  const getInitialState = (): AssetState => ({
+    assets: [],
+    folders: [],
+    tags: [],
+    collections: [],
+    selectedItems: [],
+    activeFolderId: null,
+    activeSmartFolderId: 'sf_all',
+    activeTagId: null,
+    activeCollectionId: null,
+    activeSidebarTab: 'smart',
+    expandedFolderIds: [],
+    collapsedGroupIds: [],
+    searchQuery: '',
+    viewMode: 'grid',
+    groupByFolder: true,
+    includeSubfolders: true,
+    customSmartFolders: [],
+    sortOption: 'name_asc',
+    theme: 'dark'
+  });
 
   const [state, setState] = useState<AssetState>(getInitialState);
 
