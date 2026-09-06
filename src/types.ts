@@ -1,4 +1,4 @@
-export type AssetType = 'image' | 'video' | 'model' | 'document' | 'folder';
+export type AssetType = 'image' | 'video' | 'audio' | 'model' | '3d' | 'document' | 'archive' | 'other' | 'folder';
 
 export interface Tag {
   id: string;
@@ -50,7 +50,14 @@ export interface Asset {
   tags: string[]; // tag IDs
   collections: string[]; // collection IDs
   thumbnailUrl?: string;
-  dimensions?: string; // for images/videos e.g., "1920x1080"
+  /** 图片/视频宽度 (像素) — 从 Rust 后端提取 */
+  width?: number;
+  /** 图片/视频高度 (像素) — 从 Rust 后端提取 */
+  height?: number;
+  /** 文件 SHA-256 哈希值 — 从 Rust 后端提取 */
+  fileHash?: string;
+  /** 兼容旧接口: "1920x1080" 格式 */
+  dimensions?: string;
 }
 
 export interface Folder {
