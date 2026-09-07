@@ -162,7 +162,9 @@ fn handle_batch_file_events(
         let deleted = db.delete_assets_by_paths(&removals)?;
         if deleted > 0 {
             println!("[Watcher] 批量删除 {} 个文件", deleted);
+            let mut emitted_paths: Vec<String> = Vec::new();
             for (asset_id, path) in removed_ids {
+                emitted_paths.push(path.clone());
                 let _ = app_handle.emit("asset:removed", AssetChangeEvent {
                     asset_id: Some(asset_id),
                     path,
@@ -172,7 +174,7 @@ fn handle_batch_file_events(
             }
             // 数据库中可能还存在未能查到 asset_id 的记录（如被外部修改），按 path 兜底广播
             for path in &removals {
-                if !removed_ids.iter().any(|(_, p)| p == path) {
+                if !emitted_paths.contains(path) {
                     let _ = app_handle.emit("asset:removed", AssetChangeEvent {
                         asset_id: None,
                         path: path.clone(),
