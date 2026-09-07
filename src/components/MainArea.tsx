@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { Search, Filter, Grid, List, Image as ImageIcon, Video, Box, FileText, 
   Folder as FolderIcon, FolderTree, AlertTriangle, ChevronUp, ChevronDown, 
   Layers, Columns2, FolderPlus, Loader2
@@ -7,6 +7,9 @@ import { cn, formatBytes } from '../lib/utils';
 import { Asset, AssetState, Folder, SortOption } from '../types';
 import { MonitoredSplitView } from './MonitoredSplitView';
 import { dataService } from '../services/dataService';
+
+/** 每文件夹组最多渲染的资产数量（超出的折叠显示提示，避免 DOM 爆炸） */
+const MAX_GROUPS_TO_RENDER = 100;
 
 interface MainAreaProps {
   state: AssetState;
@@ -26,6 +29,21 @@ interface MainAreaProps {
   onSelectFolder?: (id: string) => void;
   onAddMonitoredFolder?: () => void;
   onPreviewAsset?: (asset: Asset) => void;
+}
+
+// ============================================================
+// 排序比较器：预先定义为模块级函数，避免在渲染中频繁创建闭包
+// ============================================================
+function comparatorFor(option: SortOption): (a: Asset, b: Asset) => number {
+  switch (option) {
+    case 'name_asc': return (a, b) => a.name.localeCompare(b.name);
+    case 'name_desc': return (a, b) => b.name.localeCompare(a.name);
+    case 'date_modified_desc': return (a, b) => new Date(b.dateModified).getTime() - new Date(a.dateModified).getTime();
+    case 'date_modified_asc': return (a, b) => new Date(a.dateModified).getTime() - new Date(b.dateModified).getTime();
+    case 'size_desc': return (a, b) => b.size - a.size;
+    case 'size_asc': return (a, b) => a.size - b.size;
+    default: return (a, b) => a.name.localeCompare(b.name);
+  }
 }
 
 // Utility to cleanly format deep paths
@@ -71,24 +89,23 @@ export function MainArea({
   /**
    * 懒加载资产缩略图：确保通过 base64 data URL 展示（绕过浏览器 file:// 安全限制）
    *
-   * 流程说明：
-   * - 若 asset.thumbnailUrl 已存在（数据库缓存），直接读取缓存文件并返回 base64 data URL
-   * - 若无缓存，调用 Rust 后端从源文件生成缩略图并保存到数据库
-   * - 无论哪种情况，最终都通过 readThumbnailBase64 IPC 返回 base64 字符串，
-   *   绝不使用原始文件路径作为 <img src>，避免浏览器安全拦截
+   * 优化：使用队列限制并发 IPC 请求数（最多 10 个同时进行），
+   * 防止大量资产首次渲染时一次性发出上千个缩略图请求。
    */
-  const ensureThumbnail = async (asset: Asset) => {
-    // 如果已经加载过（成功或失败），不再重复请求
-    if (thumbnails[asset.id] || loadingThumbnails.has(asset.id) || failedThumbnails.has(asset.id)) return;
-    setLoadingThumbnails(prev => new Set(prev).add(asset.id));
+  // ---- 缩略图并发控制（简单 refs 队列实现） ----
+  const concurrencyRef = useRef(0);
+  const MAX_CONCURRENT_THUMBNAILS = 10;
+  const thumbnailQueueRef = useRef<Array<Asset>>([]);
+  const queuedRef = useRef<Set<string>>(new Set());
+  const processQueueRef = useRef<() => void>(() => {});
+
+  // 实际加载单张缩略图的函数
+  const loadThumbnailForAsset = async (asset: Asset) => {
     try {
-      // 传递 asset.thumbnailUrl（数据库缓存的缩略图路径），
-      // dataService.getAssetThumbnail 会优先读取缓存文件并返回 base64 data URL
       const url = await dataService.getAssetThumbnail(asset.id, asset.path, asset.thumbnailUrl);
       if (url) {
         setThumbnails(prev => ({ ...prev, [asset.id]: url }));
       } else {
-        // 返回 null 说明文件不存在或生成失败，记录到失败集合避免重复尝试
         setFailedThumbnails(prev => new Set(prev).add(asset.id));
       }
     } catch (err) {
@@ -100,7 +117,33 @@ export function MainArea({
         next.delete(asset.id);
         return next;
       });
+      queuedRef.current.delete(asset.id);
+      concurrencyRef.current--;
+      // 处理队列中的下一个
+      processQueueRef.current();
     }
+  };
+
+  // 消费队列：当并发数低于上限时取出下一个资产加载
+  processQueueRef.current = () => {
+    while (concurrencyRef.current < MAX_CONCURRENT_THUMBNAILS && thumbnailQueueRef.current.length > 0) {
+      const nextAsset = thumbnailQueueRef.current.shift();
+      if (!nextAsset) break;
+      concurrencyRef.current++;
+      loadThumbnailForAsset(nextAsset);
+    }
+  };
+
+  const ensureThumbnail = (asset: Asset) => {
+    // 如果已经加载过（成功或失败），不再重复请求
+    if (thumbnails[asset.id] || loadingThumbnails.has(asset.id) || failedThumbnails.has(asset.id)) return;
+    // 如果已排队但未执行，不重复排队
+    if (queuedRef.current.has(asset.id)) return;
+
+    queuedRef.current.add(asset.id);
+    setLoadingThumbnails(prev => new Set(prev).add(asset.id));
+    thumbnailQueueRef.current.push(asset);
+    processQueueRef.current();
   };
 
   const handleAssetClick = (e: React.MouseEvent, id: string) => {
@@ -127,52 +170,59 @@ export function MainArea({
     }
   };
 
-  const groupsMap = new Map<string, { folder: Folder, assets: Asset[] }>();
-  
-  // Collect folders from assets
-  filteredAssets.forEach(a => {
-    if (!groupsMap.has(a.folderId)) {
-      const f = state.folders.find(x => x.id === a.folderId);
-      if (f) groupsMap.set(f.id, { folder: f, assets: [] });
-    }
-    groupsMap.get(a.folderId)?.assets.push(a);
-  });
-  
-  // Add independently matched folders
-  filteredFolders.forEach(f => {
-    if (!groupsMap.has(f.id)) {
-      groupsMap.set(f.id, { folder: f, assets: [] });
-    }
-  });
+  // ============================================================
+  // 优化：分组与排序计算全部放入 useMemo（避免每次重渲染都做 O(n log n) 操作）
+  // 仅当 filteredAssets/filteredFolders/state.folders/state.sortOption
+  // state.activeTagId/state.activeCollectionId 变化时才重算。
+  // ============================================================
+  const foldersById = useMemo(() => {
+    const map = new Map<string, Folder>();
+    for (const f of state.folders) map.set(f.id, f);
+    return map;
+  }, [state.folders]);
 
-  let allGroups = Array.from(groupsMap.values());
-  
-  // When filtering by tags or collections, do not show empty folders
-  if (state.activeTagId || state.activeCollectionId) {
-    allGroups = allGroups.filter(g => g.assets.length > 0);
-  }
-
-  allGroups.sort((a, b) => a.folder.path.localeCompare(b.folder.path));
-
-  // Sort assets inside each group
-  allGroups.forEach(group => {
-    group.assets.sort((a, b) => {
-      switch (state.sortOption) {
-        case 'name_asc': return a.name.localeCompare(b.name);
-        case 'name_desc': return b.name.localeCompare(a.name);
-        case 'date_modified_desc': return new Date(b.dateModified).getTime() - new Date(a.dateModified).getTime();
-        case 'date_modified_asc': return new Date(a.dateModified).getTime() - new Date(b.dateModified).getTime();
-        case 'size_desc': return b.size - a.size;
-        case 'size_asc': return a.size - b.size;
-        default: return 0;
+  const { groups, isTruncated } = useMemo(() => {
+    const groupsMap = new Map<string, { folder: Folder, assets: Asset[] }>();
+    
+    // Collect folders from assets
+    filteredAssets.forEach(a => {
+      if (!groupsMap.has(a.folderId)) {
+        const f = foldersById.get(a.folderId);
+        if (f) groupsMap.set(f.id, { folder: f, assets: [] });
+      }
+      groupsMap.get(a.folderId)?.assets.push(a);
+    });
+    
+    // Add independently matched folders
+    filteredFolders.forEach(f => {
+      if (!groupsMap.has(f.id)) {
+        groupsMap.set(f.id, { folder: f, assets: [] });
       }
     });
-  });
 
-  // Safeguard: Limit rendering to prevent DOM crash on massive data
-  const MAX_GROUPS_TO_RENDER = 100;
-  const isTruncated = allGroups.length > MAX_GROUPS_TO_RENDER;
-  const groups = allGroups.slice(0, MAX_GROUPS_TO_RENDER);
+    let allGroups = Array.from(groupsMap.values());
+    
+    // When filtering by tags or collections, do not show empty folders
+    if (state.activeTagId || state.activeCollectionId) {
+      allGroups = allGroups.filter(g => g.assets.length > 0);
+    }
+
+    allGroups.sort((a, b) => a.folder.path.localeCompare(b.folder.path));
+
+    // Sort assets inside each group using a pre-computed comparator
+    allGroups.forEach(group => {
+      group.assets.sort(comparatorFor(state.sortOption));
+    });
+
+    // Safeguard: Limit rendering to prevent DOM crash on massive data
+    const isTruncated = allGroups.length > MAX_GROUPS_TO_RENDER;
+    return {
+      groups: allGroups.slice(0, MAX_GROUPS_TO_RENDER),
+      isTruncated,
+    };
+  }, [filteredAssets, filteredFolders, foldersById, state.sortOption, state.activeTagId, state.activeCollectionId]);
+
+
 
   return (
     <div className="flex-1 flex flex-col bg-[#141414] overflow-hidden" onClick={onClearSelection}>
