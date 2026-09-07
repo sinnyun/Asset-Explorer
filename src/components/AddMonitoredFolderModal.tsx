@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
-import { 
-  X, FolderPlus, FolderCheck, FolderTree, AlertCircle, 
-  CheckCircle2, Loader2, Sparkles, HardDrive, ArrowRight 
+import {
+  X, FolderPlus, FolderCheck, FolderTree,
+  Loader2, HardDrive, ArrowRight
 } from 'lucide-react';
 import { Folder } from '../types';
 import { apiClient, runtime } from '../services/api';
@@ -22,7 +22,6 @@ export function AddMonitoredFolderModal({
   const [folderPath, setFolderPath] = useState('D:\\DesignWorkspace');
   const [folderName, setFolderName] = useState('DesignWorkspace');
   const [isScanning, setIsScanning] = useState(false);
-  const [scanStatus, setScanStatus] = useState<string>('');
 
   // 现有已被标记为监视根目录的文件夹
   const monitoredFolders = useMemo(() => {
@@ -97,20 +96,17 @@ export function AddMonitoredFolderModal({
 
   const handleStartScan = async () => {
     if (!folderPath.trim()) return;
-    setIsScanning(true);
-    setScanStatus('正在连接 Rust 后端并发索引引擎...');
-
     try {
-      setScanStatus('正在递归遍历磁盘文件并建立 SQLite 嵌入式数据库索引...');
+      setIsScanning(true);
+      // 桌面模式：onConfirmAddAndScan 触发后台增量扫描后立即返回，
+      // 此处随即关闭模态框，扫描进度转移到程序底部的全局进度条展示；
+      // 界面上的资产会随扫描增量事件边扫边显示，不被全量扫描卡住。
       await onConfirmAddAndScan(folderPath.trim(), folderName.trim(), true);
-      setScanStatus('扫描完成！资产已成功写入本地数据库并建立分列监控。');
-      setTimeout(() => {
-        setIsScanning(false);
-        onClose();
-      }, 500);
     } catch (err) {
       alert('添加与扫描失败: ' + String(err));
+    } finally {
       setIsScanning(false);
+      onClose();
     }
   };
 
@@ -223,13 +219,6 @@ export function AddMonitoredFolderModal({
             </div>
           )}
 
-          {/* Scanning Progress */}
-          {isScanning && (
-            <div className="p-3.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-xs text-blue-300 flex items-center gap-3 animate-pulse">
-              <Loader2 size={18} className="animate-spin text-blue-400 shrink-0" />
-              <span>{scanStatus}</span>
-            </div>
-          )}
         </div>
 
         {/* Footer */}

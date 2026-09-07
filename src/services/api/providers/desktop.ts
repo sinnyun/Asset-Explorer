@@ -132,6 +132,11 @@ class DesktopApiProvider implements ApiProvider {
     };
   }
 
+  /** 后台增量扫描本地目录（scan:started / scan:chunk / scan:finished / scan:failed 事件流） */
+  async startScanDirectory(path: string): Promise<void> {
+    await callRust<void>('start_scan_directory', { path });
+  }
+
   /** 懒加载获取资产缩略图 */
   async getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
     // 场景 1：已有缩略图缓存 → 直接读取 base64 返回

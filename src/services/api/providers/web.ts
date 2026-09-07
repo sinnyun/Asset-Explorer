@@ -165,6 +165,11 @@ class WebApiProvider implements ApiProvider {
     return null;
   }
 
+  /** Web 模式不支持后台目录扫描 */
+  async startScanDirectory(_path: string): Promise<void> {
+    console.warn('[WebApi] Web 模式不支持本地文件扫描');
+  }
+
   /** Web 模式使用 HTTP 缩略图 URL */
   async getAssetThumbnail(_assetId: string, _path: string, existingThumbnailUrl?: string): Promise<string | null> {
     // Web 模式下缩略图直接使用 asset.thumbnailUrl（HTTP URL）

@@ -80,6 +80,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_workspace,
             scan_directory,
+            start_scan_directory,
             search_assets,
             set_asset_rating,
             set_asset_favorite,

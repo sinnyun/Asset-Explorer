@@ -22,7 +22,10 @@ import { useEntityActions } from './hooks/useEntityActions';
 import { useContextMenuHandlers } from './hooks/useContextMenuHandlers';
 import { useMiscActions } from './hooks/useMiscActions';
 import { dataService } from './services/dataService';
+import { runtime } from './services/api';
 import { handleConfirmAddAndScan as scanAndAddFolder } from './hooks/useFolderScan';
+import { useScanMonitor } from './hooks/useScanMonitor';
+import { ScanProgressBar } from './components/ScanProgressBar';
 import type { Asset } from './types';
 
 export default function App() {
@@ -44,6 +47,9 @@ export default function App() {
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
 
   useFileMonitoring(setState);
+
+  // 后台增量扫描监视：进度条 + 边扫边显示资产
+  const { progress: scanProgress, startScan } = useScanMonitor(setState);
 
   // 导航与选中操作
   const {
@@ -126,6 +132,13 @@ export default function App() {
   const handleScanLocalFolder = () => setAddMonitoredModalOpen(true);
 
   const handleConfirmAddAndScan = async (folderPath: string, folderName: string, isMonitored: boolean) => {
+    if (runtime.isDesktop) {
+      // 桌面模式：触发后台增量扫描后立即返回（模态框随即关闭），
+      // 进度与增量资产由 useScanMonitor 通过事件流实时更新。
+      await startScan(folderPath, folderName, state);
+      return;
+    }
+    // Web 预览环境：沿用原有的模拟添加流程
     await scanAndAddFolder(folderPath, folderName, isMonitored, state, setState);
   };
 
@@ -202,6 +215,8 @@ export default function App() {
           onClose={() => setContextMenu(null)} 
         />
       )}
+
+      <ScanProgressBar progress={scanProgress} />
 
       <BulkActionBar 
         state={state}
