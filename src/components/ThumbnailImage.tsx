@@ -2,13 +2,18 @@
  * ============================================================================
  * 组件：缩略图图片 (ThumbnailImage)
  * 职责：
- * 1. 统一处理桌面模式下缩略图的 base64 转换（绕过浏览器 file:// 安全限制）
+ * 1. 统一处理桌面模式下缩略图的加载（桌面模式通过 Rust IPC 获取/生成缩略图）
  * 2. Web 模式下直接使用 asset.thumbnailUrl（Web 模式下无 file:// 限制）
  * 3. 提供加载中状态和失败后的占位图标
  * 4. 一处定义，多处复用（PropertiesPanel、MonitoredSplitView、列表视图等）
+ *
+ * 【修复】自动恢复失效缩略图：
+ *   当桌面模式下 asset:// URL 因缓存文件被清理/数据迁移导致 404 时，
+ *   <img> 触发 onError → 自动通过 Rust IPC 重新生成缩略图并更新缓存，
+ *   避免缩略图空白占位。
  * ============================================================================
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Asset } from '../types';
 import { dataService, isTauriDesktop } from '../services/dataService';
 import { Loader2 } from 'lucide-react';
@@ -19,6 +24,11 @@ import { Loader2 } from 'lucide-react';
  * - 避免重新反序列化数十 KB 的 base64 字符串造成主线程卡顿
  */
 const thumbnailCache = new Map<string, string>();
+
+/** 已触发过重新生成的资产 ID 集合（防止 onError 死循环重试） */
+const regenerationAttempted = new Set<string>();
+
+/** 进行中的缩略图请求合并（同一资产去重） */
 const inFlightThumbnails = new Map<string, Promise<string | null>>();
 
 interface ThumbnailImageProps {
@@ -34,38 +44,36 @@ interface ThumbnailImageProps {
 }
 
 /**
- * 缩略图组件：自动处理桌面环境下的 base64 转换与缓存
+ * 缩略图组件：自动处理桌面环境下的缩略图加载与缓存
  *
  * 优化策略：
  * 1. 内存二级缓存：已加载的缩略图直接从 Map 读取，初次渲染 0ms 显示，无 IPC 开销。
  * 2. 请求合并去重：同一资产被多次引用时，复用同一个 in-flight Promise。
- * 3. 错误恢复：图片加载失败时平滑降级为 fallbackIcon，防止白屏或破损图片标识。
+ * 3. 自动恢复：图片加载失败时自动触发 Rust 后端重新生成缩略图。
  */
 export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 'lazy' }: ThumbnailImageProps) {
   const cacheKey = asset.id;
-  const cachedUrl = thumbnailCache.get(cacheKey) || (!isTauriDesktop() && asset.thumbnailUrl ? asset.thumbnailUrl : null);
+  const isDesktop = useRef(isTauriDesktop()).current;
+  const mountedRef = useRef(true);
 
+  // 初始 URL：优先从内存缓存读取；
+  // Web 环境下若无缓存但 asset.thumbnailUrl 存在，直接使用（无需 IPC）。
+  const cachedUrl = thumbnailCache.get(cacheKey)
+    || (!isDesktop && asset.thumbnailUrl ? asset.thumbnailUrl : null);
   const [thumbUrl, setThumbUrl] = useState<string | null>(cachedUrl);
   const [loadingState, setLoadingState] = useState<'idle' | 'loading' | 'done' | 'failed'>(
     cachedUrl ? 'done' : 'idle'
   );
-  const isDesktop = useRef(isTauriDesktop()).current;
-  const mountedRef = useRef(true);
-
-  useEffect(() => {
-    mountedRef.current = true;
-
-    // 如果内存缓存中已有，直接使用
-    const hit = thumbnailCache.get(cacheKey);
-    if (hit) {
-      setThumbUrl(hit);
-      setLoadingState('done');
-      return;
-    }
-
-    // Web 环境：直接使用 asset.thumbnailUrl
+  /**
+   * 加载缩略图。
+   * @param forceRegenerate - 为 true 时跳过已有的 thumbnailUrl 缓存路径，
+   *   直接调用 Rust get_thumbnail 强制验证/重新生成。
+   */
+  const loadThumbnail = useCallback((forceRegenerate = false) => {
     if (!isDesktop) {
+      // Web 环境：直接使用 asset.thumbnailUrl
       if (asset.thumbnailUrl) {
+        regenerationAttempted.delete(cacheKey);
         thumbnailCache.set(cacheKey, asset.thumbnailUrl);
         setThumbUrl(asset.thumbnailUrl);
         setLoadingState('done');
@@ -75,22 +83,27 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
       return;
     }
 
-    // 桌面环境：通过 Rust IPC 读取并缓存
-    setLoadingState('loading');
-
-    let requestPromise = inFlightThumbnails.get(cacheKey);
+    // 合并并发请求：同一资产的重复调用共享同一个 Promise
+    const reqKey = `${cacheKey}:${forceRegenerate ? 'regen' : 'normal'}`;
+    let requestPromise = inFlightThumbnails.get(reqKey);
     if (!requestPromise) {
-      requestPromise = dataService.getAssetThumbnail(asset.id, asset.path, asset.thumbnailUrl)
-        .finally(() => {
-          inFlightThumbnails.delete(cacheKey);
-        });
-      inFlightThumbnails.set(cacheKey, requestPromise);
+      requestPromise = dataService.getAssetThumbnail(
+        asset.id,
+        asset.path,
+        forceRegenerate ? undefined : asset.thumbnailUrl
+      ).finally(() => {
+        inFlightThumbnails.delete(reqKey);
+      });
+      inFlightThumbnails.set(reqKey, requestPromise);
     }
 
+    setLoadingState('loading');
     requestPromise
       .then((url) => {
         if (!mountedRef.current) return;
         if (url) {
+          // 缩略图加载成功 → 清除重试标记，允许后续失败再次自动恢复
+          regenerationAttempted.delete(cacheKey);
           thumbnailCache.set(cacheKey, url);
           setThumbUrl(url);
           setLoadingState('done');
@@ -103,11 +116,63 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
           setLoadingState('failed');
         }
       });
+  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    // 如果内存缓存中已有，直接使用
+    const hit = thumbnailCache.get(cacheKey);
+    if (hit) {
+      regenerationAttempted.delete(cacheKey);
+      setThumbUrl(hit);
+      setLoadingState('done');
+      return;
+    }
+
+    // Web 环境：直接使用 asset.thumbnailUrl
+    if (!isDesktop) {
+      if (asset.thumbnailUrl) {
+        regenerationAttempted.delete(cacheKey);
+        thumbnailCache.set(cacheKey, asset.thumbnailUrl);
+        setThumbUrl(asset.thumbnailUrl);
+        setLoadingState('done');
+      } else {
+        setLoadingState('failed');
+      }
+      return;
+    }
+
+    // 桌面环境：通过 Rust IPC 获取/生成缩略图
+    loadThumbnail(false);
 
     return () => {
       mountedRef.current = false;
     };
-  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop]);
+  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop, loadThumbnail]);
+
+  /**
+   * 处理 <img> 加载失败事件：
+   * - 桌面模式下，若 asset:// URL 因缓存文件失效导致 404，
+   *   自动通过 Rust IPC 重新生成缩略图（只重试一次）。
+   * - Web 模式下 URL 由服务端管理，直接显示占位图标。
+   */
+  const handleImageError = useCallback(() => {
+    if (!isDesktop) {
+      setLoadingState('failed');
+      return;
+    }
+    // 每个资产只自动重新生成一次，防止 onError 无限循环
+    if (!regenerationAttempted.has(cacheKey)) {
+      regenerationAttempted.add(cacheKey);
+      // 清除缓存与旧的 URL，强制走重新生成流程
+      thumbnailCache.delete(cacheKey);
+      setThumbUrl(null);
+      loadThumbnail(true);
+    } else {
+      setLoadingState('failed');
+    }
+  }, [cacheKey, isDesktop, loadThumbnail]);
 
   // 缩略图加载完成 → 显示图片
   if (thumbUrl && loadingState !== 'failed') {
@@ -117,7 +182,7 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
         alt={alt || asset.name}
         className={className}
         loading={loading}
-        onError={() => setLoadingState('failed')}
+        onError={handleImageError}
       />
     );
   }

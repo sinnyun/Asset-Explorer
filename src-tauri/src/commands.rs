@@ -528,3 +528,10 @@ pub async fn read_file_base64(file_path: String) -> Result<String, String> {
     .await
     .map_err(|e| format!("后台线程执行失败: {}", e))?
 }
+
+/// 指令 27: 轻量检查本地文件是否存在
+/// 用于前端缩略图加载前验证缓存文件有效性，避免 asset:// URL 404
+#[tauri::command]
+pub fn file_exists(file_path: String) -> bool {
+    std::path::Path::new(&file_path).exists()
+}
