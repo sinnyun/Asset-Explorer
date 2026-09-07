@@ -137,28 +137,33 @@ class DesktopApiProvider implements ApiProvider {
     await callRust<void>('start_scan_directory', { path });
   }
 
-  /** 懒加载获取资产缩略图 */
+  /** 懒加载获取资产缩略图 (优先使用 Tauri 原生 asset 协议，避免 Base64 IPC 内存开销) */
   async getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
-    // 场景 1：已有缩略图缓存 → 直接读取 base64 返回
+    // 场景 1：已有缩略图缓存本地路径 → 优先使用 convertFileSrc 零拷贝流式渲染
     if (existingThumbnailUrl) {
-      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: existingThumbnailUrl });
-      if (dataUrl) return dataUrl;
-      // 缓存文件不存在，降级到重新生成
-    }
-
-    // 场景 2：调用 Rust 从源文件生成缩略图
-    const thumbPath = await callRust<string>('get_thumbnail', { assetId, path, maxDimension: 256 });
-    if (thumbPath) {
-      // 通过 IPC 读取缩略图 base64
-      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: thumbPath });
-      if (dataUrl) return dataUrl;
-      // 兜底：尝试 convertFileSrc
       try {
         const { convertFileSrc } = await import('@tauri-apps/api/core');
-        return convertFileSrc(thumbPath);
+        const assetUrl = convertFileSrc(existingThumbnailUrl);
+        if (assetUrl) return assetUrl;
       } catch {
-        return null;
+        // 降级使用 base64
       }
+      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: existingThumbnailUrl });
+      if (dataUrl) return dataUrl;
+    }
+
+    // 场景 2：调用 Rust 从源文件生成缩略图，返回生成的缓存路径
+    const thumbPath = await callRust<string>('get_thumbnail', { assetId, path, maxDimension: 256 });
+    if (thumbPath) {
+      try {
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        const assetUrl = convertFileSrc(thumbPath);
+        if (assetUrl) return assetUrl;
+      } catch {
+        // 降级使用 base64
+      }
+      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: thumbPath });
+      if (dataUrl) return dataUrl;
     }
     return null;
   }

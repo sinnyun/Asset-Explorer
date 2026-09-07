@@ -49,6 +49,33 @@ export function normalizeAssets(assets: any[]): Asset[] {
 }
 
 /**
+ * 标准化智能文件夹数据
+ * - 若后端存储为 rulesJson 字符串（PostgreSQL），安全解析为 rules: SmartFolderRule[]
+ * - 确保 rules 始终为数组，matchAll 为布尔值
+ */
+export function normalizeSmartFolder(sf: any): SmartFolder {
+  let rules = sf.rules;
+  if (!rules && typeof sf.rulesJson === 'string') {
+    try {
+      rules = JSON.parse(sf.rulesJson);
+    } catch {
+      rules = [];
+    }
+  }
+  return {
+    ...sf,
+    rules: Array.isArray(rules) ? rules : [],
+    matchAll: sf.matchAll ?? true,
+    isPinned: sf.isPinned ?? false,
+  };
+}
+
+/** 批量标准化智能文件夹列表 */
+export function normalizeSmartFolders(smartFolders: any[]): SmartFolder[] {
+  return (smartFolders || []).map(normalizeSmartFolder);
+}
+
+/**
  * 标准化日期字段
  * PostgreSQL/Drizzle 返回 Date 对象，需转为 ISO 字符串
  */

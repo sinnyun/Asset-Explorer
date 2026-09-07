@@ -1,12 +1,136 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useLayoutEffect } from 'react';
 import { Search, Filter, Grid, List, Image as ImageIcon, Video, Box, FileText, 
   Folder as FolderIcon, FolderTree, AlertTriangle, ChevronUp, ChevronDown, 
-  Layers, Columns2, FolderPlus, Loader2
+  Layers, Columns2, FolderPlus
 } from 'lucide-react';
 import { cn, formatBytes } from '../lib/utils';
-import { Asset, AssetState, Folder, SortOption } from '../types';
+import { Asset, AssetState, Folder, SortOption, Tag } from '../types';
 import { MonitoredSplitView } from './MonitoredSplitView';
-import { dataService } from '../services/dataService';
+import { ThumbnailImage } from './ThumbnailImage';
+
+/**
+ * 智能自适应标签栏组件
+ * - 根据实际容器可用物理方块宽度（像素）动态计算可容纳的标签胶囊
+ * - 超出空间时自动折叠为 [+N] 胶囊，悬浮展示完整隐藏标签列表
+ * - 严格单行（flex-nowrap + overflow-hidden），绝不破坏卡片或列表的统一高度
+ */
+function AdaptiveTagRow({ 
+  tagIds, 
+  tagMap, 
+  maxRowWidth 
+}: { 
+  tagIds: string[]; 
+  tagMap: Map<string, Tag>; 
+  maxRowWidth?: number;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState<number>(maxRowWidth || 0);
+
+  useLayoutEffect(() => {
+    if (maxRowWidth) {
+      setContainerWidth(maxRowWidth);
+      return;
+    }
+    if (!containerRef.current) return;
+    
+    const updateWidth = () => {
+      if (containerRef.current) {
+        const clientW = containerRef.current.clientWidth;
+        if (clientW > 0) {
+          setContainerWidth(clientW);
+        }
+      }
+    };
+    
+    updateWidth();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.contentRect.width > 0) {
+            setContainerWidth(entry.contentRect.width);
+          }
+        }
+      });
+      ro.observe(containerRef.current);
+      return () => ro.disconnect();
+    }
+  }, [maxRowWidth]);
+
+  const { visibleTags, overflowCount, hiddenTagNames } = useMemo(() => {
+    const validTags = tagIds
+      .map(id => tagMap.get(id))
+      .filter((t): t is Tag => Boolean(t));
+
+    if (validTags.length === 0) {
+      return { visibleTags: [], overflowCount: 0, hiddenTagNames: [] };
+    }
+
+    // 默认回退宽度（当容器尚未测量时提供合理的网格卡片宽度 ~170px）
+    const targetWidth = containerWidth > 0 ? containerWidth : 170;
+    const moreBadgeWidth = 32; // '+N' 胶囊的物理宽度预留
+    const gap = 4; // gap-1 间距 4px
+
+    let accumulatedWidth = 0;
+    const visible: Tag[] = [];
+    const hidden: string[] = [];
+
+    for (let i = 0; i < validTags.length; i++) {
+      const tag = validTags[i];
+      // 精确估算每个标签胶囊的实际物理占用宽度：
+      // 内边距 (12px) + 彩色指示点 (6px) + 间隙 (4px) + 字符宽度 (字符数 * ~6.8px) + 边框 (2px)
+      const approxCharWidth = 6.8;
+      const pillBaseOverhead = 24;
+      const textWidth = Math.min(tag.name.length * approxCharWidth, 68);
+      const tagPillWidth = Math.min(Math.max(pillBaseOverhead + textWidth, 38), 92);
+
+      const hasRemaining = validTags.length - (i + 1) > 0;
+      const reserveForMore = hasRemaining ? moreBadgeWidth + gap : 0;
+
+      // 如果当前标签放得下，或者即使只有 1 个标签也至少展示首个截断标签
+      if (accumulatedWidth + tagPillWidth + reserveForMore <= targetWidth || (visible.length === 0 && tagPillWidth <= targetWidth)) {
+        visible.push(tag);
+        accumulatedWidth += tagPillWidth + gap;
+      } else {
+        hidden.push(...validTags.slice(i).map(t => t.name));
+        break;
+      }
+    }
+
+    return {
+      visibleTags: visible,
+      overflowCount: validTags.length - visible.length,
+      hiddenTagNames: hidden,
+    };
+  }, [tagIds, tagMap, containerWidth]);
+
+  return (
+    <div ref={containerRef} className="w-full flex items-center gap-1 overflow-hidden flex-nowrap">
+      {visibleTags.map(tag => (
+        <span
+          key={tag.id}
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-neutral-800/90 border border-neutral-700/60 text-neutral-300 text-[10px] truncate shrink-0 max-w-[90px] hover:border-neutral-500 hover:text-white transition-all shadow-xs"
+          title={`标签: ${tag.name}`}
+        >
+          <span 
+            className="w-1.5 h-1.5 rounded-full shrink-0 shadow-sm ring-1 ring-black/40" 
+            style={{ backgroundColor: tag.color || '#3B82F6' }} 
+          />
+          <span className="truncate">{tag.name}</span>
+        </span>
+      ))}
+
+      {overflowCount > 0 && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-neutral-800/90 border border-neutral-700/60 text-neutral-400 text-[9px] font-mono shrink-0 hover:text-neutral-200 transition-colors cursor-help"
+          title={`折叠更多标签 (${overflowCount}):\n${hiddenTagNames.join('、')}`}
+        >
+          +{overflowCount}
+        </span>
+      )}
+    </div>
+  );
+}
 
 /** 每文件夹组最多渲染的资产数量（超出的折叠显示提示，避免 DOM 爆炸） */
 const MAX_GROUPS_TO_RENDER = 100;
@@ -78,73 +202,10 @@ export function MainArea({
   
   const [localSearch, setLocalSearch] = useState('');
   const [isSplitMonitoredView, setIsSplitMonitoredView] = useState(false);
-  
-  // 懒加载缩略图缓存：assetId → 可展示 URL
-  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
-  // 跟踪正在加载中的资产，避免重复请求
-  const [loadingThumbnails, setLoadingThumbnails] = useState<Set<string>>(new Set());
-  // 跟踪缩略图生成失败的资产（如文件路径不存在），避免反复重试
-  const [failedThumbnails, setFailedThumbnails] = useState<Set<string>>(new Set());
 
-  /**
-   * 懒加载资产缩略图：确保通过 base64 data URL 展示（绕过浏览器 file:// 安全限制）
-   *
-   * 优化：使用队列限制并发 IPC 请求数（最多 10 个同时进行），
-   * 防止大量资产首次渲染时一次性发出上千个缩略图请求。
-   */
-  // ---- 缩略图并发控制（简单 refs 队列实现） ----
-  const concurrencyRef = useRef(0);
-  const MAX_CONCURRENT_THUMBNAILS = 10;
-  const thumbnailQueueRef = useRef<Array<Asset>>([]);
-  const queuedRef = useRef<Set<string>>(new Set());
-  const processQueueRef = useRef<() => void>(() => {});
-
-  // 实际加载单张缩略图的函数
-  const loadThumbnailForAsset = async (asset: Asset) => {
-    try {
-      const url = await dataService.getAssetThumbnail(asset.id, asset.path, asset.thumbnailUrl);
-      if (url) {
-        setThumbnails(prev => ({ ...prev, [asset.id]: url }));
-      } else {
-        setFailedThumbnails(prev => new Set(prev).add(asset.id));
-      }
-    } catch (err) {
-      console.warn(`[MainArea] 缩略图生成失败: ${asset.path}`, err);
-      setFailedThumbnails(prev => new Set(prev).add(asset.id));
-    } finally {
-      setLoadingThumbnails(prev => {
-        const next = new Set(prev);
-        next.delete(asset.id);
-        return next;
-      });
-      queuedRef.current.delete(asset.id);
-      concurrencyRef.current--;
-      // 处理队列中的下一个
-      processQueueRef.current();
-    }
-  };
-
-  // 消费队列：当并发数低于上限时取出下一个资产加载
-  processQueueRef.current = () => {
-    while (concurrencyRef.current < MAX_CONCURRENT_THUMBNAILS && thumbnailQueueRef.current.length > 0) {
-      const nextAsset = thumbnailQueueRef.current.shift();
-      if (!nextAsset) break;
-      concurrencyRef.current++;
-      loadThumbnailForAsset(nextAsset);
-    }
-  };
-
-  const ensureThumbnail = (asset: Asset) => {
-    // 如果已经加载过（成功或失败），不再重复请求
-    if (thumbnails[asset.id] || loadingThumbnails.has(asset.id) || failedThumbnails.has(asset.id)) return;
-    // 如果已排队但未执行，不重复排队
-    if (queuedRef.current.has(asset.id)) return;
-
-    queuedRef.current.add(asset.id);
-    setLoadingThumbnails(prev => new Set(prev).add(asset.id));
-    thumbnailQueueRef.current.push(asset);
-    processQueueRef.current();
-  };
+  // 映射字典，常数级快速查找标签和集合对象
+  const tagMap = useMemo(() => new Map(state.tags.map(t => [t.id, t])), [state.tags]);
+  const colMap = useMemo(() => new Map(state.collections.map(c => [c.id, c])), [state.collections]);
 
   const handleAssetClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -398,21 +459,60 @@ export function MainArea({
                           onContextMenu={(e) => onContextMenuAsset(e, asset.id)}
                           onDoubleClick={() => handleAssetDoubleClick(asset)}
                           className={cn(
-                            "flex items-center gap-4 px-3 py-2 rounded-md cursor-pointer transition-colors border border-transparent",
+                            "flex items-center gap-4 px-3 py-2 rounded-md cursor-pointer transition-colors border border-transparent [content-visibility:auto] [contain-intrinsic-size:40px]",
                             isAssetSelected ? "bg-blue-500/10 border-blue-500/30" : "hover:bg-white/5"
                           )}
                         >
                           <div className="w-8 h-8 flex items-center justify-center shrink-0 rounded overflow-hidden bg-[#111]">
-                            {(() => {
-                              // 只使用 thumbnails 中的 base64 data URL，绝不使用 asset.thumbnailUrl 原始文件路径
-                              if (thumbnails[asset.id]) {
-                                return <img src={thumbnails[asset.id]} alt="" className="w-full h-full object-cover" />;
-                              }
-                              ensureThumbnail(asset);
-                              return getAssetIcon(asset.type);
-                            })()}
+                            <ThumbnailImage
+                              asset={asset}
+                              className="w-full h-full object-cover"
+                              fallbackIcon={getAssetIcon(asset.type)}
+                            />
                           </div>
-                          <div className="flex-1 truncate text-sm text-neutral-200">{asset.name}</div>
+                          <div className="flex-1 min-w-0 flex items-center gap-3">
+                            <span className="truncate text-sm text-neutral-200 font-medium max-w-[220px] shrink-0" title={asset.name}>
+                              {asset.name}
+                            </span>
+                            
+                            {/* 紧凑自适应胶囊栏：严格限制在单行内，宽度过长时自动折叠，不影响列表行高度 */}
+                            <div className="hidden md:flex items-center gap-2 overflow-hidden flex-nowrap max-w-[360px] shrink-0">
+                              {/* 集合徽章 */}
+                              {asset.collections.length > 0 && (
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {(() => {
+                                    const firstCol = colMap.get(asset.collections[0]);
+                                    if (!firstCol) return null;
+                                    return (
+                                      <span
+                                        key={asset.collections[0]}
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[10px] font-medium max-w-[120px] truncate shadow-xs"
+                                        title={`所属集合: ${asset.collections.map(id => colMap.get(id)?.name).filter(Boolean).join(', ')}`}
+                                      >
+                                        <Layers size={9} className="text-amber-400 shrink-0" />
+                                        <span className="truncate">{firstCol.name}</span>
+                                      </span>
+                                    );
+                                  })()}
+                                  {asset.collections.length > 1 && (
+                                    <span
+                                      className="px-1.5 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[9px] font-mono shrink-0"
+                                      title={asset.collections.map(id => colMap.get(id)?.name).filter(Boolean).join(', ')}
+                                    >
+                                      +{asset.collections.length - 1}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* 标签自适应单行 */}
+                              {asset.tags.length > 0 && (
+                                <div className="flex-1 min-w-0 max-w-[220px]">
+                                  <AdaptiveTagRow tagIds={asset.tags} tagMap={tagMap} maxRowWidth={210} />
+                                </div>
+                              )}
+                            </div>
+                          </div>
                           <div className="w-24 text-right text-xs text-neutral-500 shrink-0">{formatBytes(asset.size)}</div>
                           <div className="w-32 text-right text-xs text-neutral-500 truncate shrink-0">{asset.dateModified.split('T')[0]}</div>
                         </div>
@@ -427,7 +527,7 @@ export function MainArea({
                         onContextMenu={(e) => onContextMenuAsset(e, asset.id)}
                         onDoubleClick={() => handleAssetDoubleClick(asset)}
                         className={cn(
-                          "group relative rounded-lg overflow-hidden border cursor-pointer transition-all duration-200 bg-[#1e1e1e] flex flex-col",
+                          "group relative rounded-lg overflow-hidden border cursor-pointer transition-all duration-200 bg-[#1e1e1e] flex flex-col [content-visibility:auto] [contain-intrinsic-size:220px]",
                           isAssetSelected 
                             ? "border-blue-500 ring-1 ring-blue-500 shadow-[0_0_0_1px_rgba(59,130,246,0.5)]" 
                             : "border-neutral-800 hover:border-neutral-600 hover:bg-[#252525]"
@@ -439,58 +539,47 @@ export function MainArea({
                             {asset.type}
                           </div>
 
-                          {/* 缩略图懒加载：只使用 base64 data URL，绝不使用原始文件路径
-                               asset.thumbnailUrl 是数据库中的原始文件路径（如 D:/.../xxx.png），
-                               浏览器禁止加载 file:/// 资源。必须通过 ensureThumbnail 调用 Rust IPC
-                               readThumbnailBase64 转换为 base64 后存入 thumbnails 状态再展示。 */}
-                          {(() => {
-                            const base64Url = thumbnails[asset.id];
-                            if (base64Url) {
-                              return (
-                                <img 
-                                  src={base64Url} 
-                                  alt={asset.name} 
-                                  className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                                  loading="lazy"
-                                />
-                              );
-                            }
-                            // 异步触发懒加载：已有 thumbnailUrl 则读取缓存，否则生成新缩略图
-                            ensureThumbnail(asset);
-                            return (
+                          {/* 缩略图懒加载：通过 ThumbnailImage 组件高效渲染，支持内存缓存与优雅降级 */}
+                          <ThumbnailImage
+                            asset={asset}
+                            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                            fallbackIcon={
                               <div className="transform transition-transform duration-300 group-hover:scale-110">
-                                {loadingThumbnails.has(asset.id)
-                                  ? <Loader2 size={24} className="animate-spin text-neutral-500" />
-                                  : getAssetIcon(asset.type)
-                                }
+                                {getAssetIcon(asset.type)}
                               </div>
-                            );
-                          })()}
+                            }
+                          />
                           
-                          {/* Bottom Left Tags */}
-                          {asset.tags.length > 0 && (
-                            <div className="absolute bottom-2 left-2 z-10 flex gap-1">
-                              {asset.tags.map(tid => {
-                                const tag = state.tags.find(t => t.id === tid);
-                                if (!tag) return null;
-                                return <div key={tid} className="w-2.5 h-2.5 rounded-full ring-1 ring-black/50" style={{ backgroundColor: tag.color }} title={tag.name} />
-                              })}
+                          {/* 缩略图左下角专属：归属集合徽章 (严格单行 + 自动折叠超额集合，绝不撑出画面) */}
+                          {asset.collections.length > 0 && (
+                            <div className="absolute bottom-2 left-2 z-10 flex items-center gap-1 pointer-events-none max-w-[85%] flex-nowrap">
+                              {(() => {
+                                const firstCol = colMap.get(asset.collections[0]);
+                                if (!firstCol) return null;
+                                return (
+                                  <span
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/80 backdrop-blur-md border border-amber-500/40 text-amber-300 text-[10px] font-medium shadow-md truncate shrink min-w-0"
+                                    title={`所属集合: ${asset.collections.map(id => colMap.get(id)?.name).filter(Boolean).join(', ')}`}
+                                  >
+                                    <Layers size={10} className="text-amber-400 shrink-0" />
+                                    <span className="truncate max-w-[95px]">{firstCol.name}</span>
+                                  </span>
+                                );
+                              })()}
+                              {asset.collections.length > 1 && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded-md bg-black/80 backdrop-blur-md border border-amber-500/40 text-amber-300 text-[9px] font-mono shadow-md shrink-0"
+                                  title={asset.collections.map(id => colMap.get(id)?.name).filter(Boolean).join(', ')}
+                                >
+                                  +{asset.collections.length - 1}
+                                </span>
+                              )}
                             </div>
                           )}
 
-                          {/* Bottom Right Collections */}
+                          {/* 缩略图底部渐变阴影，保护徽章可读性 */}
                           {asset.collections.length > 0 && (
-                            <div className="absolute bottom-2 right-2 z-10 flex gap-1">
-                              {asset.collections.map(cid => {
-                                const col = state.collections.find(c => c.id === cid);
-                                if (!col) return null;
-                                return (
-                                  <div key={cid} className="bg-black/60 backdrop-blur-md p-1 rounded shadow-sm flex items-center justify-center" title={col.name}>
-                                    <Layers size={10} className="text-amber-500" />
-                                  </div>
-                                );
-                              })}
-                            </div>
+                            <div className="absolute inset-x-0 bottom-0 h-9 bg-gradient-to-t from-black/70 to-transparent pointer-events-none" />
                           )}
 
                           <div className={cn(
@@ -499,11 +588,26 @@ export function MainArea({
                           )} />
                         </div>
                         
-                        <div className="p-3 flex-1 flex flex-col justify-between">
-                          <div className="text-sm font-medium text-neutral-200 truncate" title={asset.name}>
+                        {/* 卡片信息区：固定结构与统一高度（82px），彻底消除卡片大小跳动与高低不平 */}
+                        <div className="p-2.5 flex flex-col justify-between h-[82px] shrink-0">
+                          <div className="text-sm font-medium text-neutral-200 truncate group-hover:text-white transition-colors leading-snug" title={asset.name}>
                             {asset.name}
                           </div>
-                          <div className="flex items-center justify-between mt-1 text-xs text-neutral-500">
+
+                          {/* 标签栏（根据实际可用物理宽度自适应折叠计算，严格单行无折行） */}
+                          <div className="h-5 flex items-center overflow-hidden my-0.5">
+                            {asset.tags.length > 0 ? (
+                              <AdaptiveTagRow tagIds={asset.tags} tagMap={tagMap} />
+                            ) : (
+                              <div className="text-[10px] text-neutral-600/40 select-none flex items-center gap-1">
+                                <span className="w-1 h-1 rounded-full bg-neutral-800" />
+                                <span className="italic">无标签</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* 底部元数据栏 */}
+                          <div className="flex items-center justify-between text-[11px] text-neutral-500 pt-1 border-t border-neutral-800/60 mt-auto">
                             <span className="truncate pr-2">{formatBytes(asset.size)}</span>
                             <span className="shrink-0">{asset.dateModified.split('T')[0]}</span>
                           </div>

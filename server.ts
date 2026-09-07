@@ -49,13 +49,10 @@ async function startServer() {
   // ==========================================================================
 
   if (process.env.NODE_ENV !== "production") {
-    // 开发模式：使用 Vite 中间件提供前端热更新
-    // 显式指定 HMR 端口为 3001，避免与默认端口 24678 冲突
-    // （之前进程退出后端口 24678 可能残留占用，导致 HMR WebSocket 无法启动）
+    // 开发模式：使用 Vite 中间件
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: { port: 3001 },
       },
       appType: "spa",
     });
@@ -64,7 +61,7 @@ async function startServer() {
     // 生产模式：提供静态文件
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*all', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
@@ -76,4 +73,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error('[Server] Failed to start dev server:', err);
+});
+

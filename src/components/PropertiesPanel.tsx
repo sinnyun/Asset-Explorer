@@ -12,6 +12,7 @@ import { CollectionProperties } from './properties/CollectionProperties';
 import { SmartFolderProperties } from './properties/SmartFolderProperties';
 import { FolderProperties } from './properties/FolderProperties';
 import { AssetPreviewToggle } from './preview/AssetPreviewToggle';
+import { ScrollableAssociationSelector } from './properties/ScrollableAssociationSelector';
 
 interface PropertiesPanelProps {
   state: AssetState;
@@ -322,10 +323,16 @@ export function PropertiesPanel({
                     {unassignedTags.length > 0 && (
                       <button
                         onClick={() => setEditingAssoc(editingAssoc === 'tag' ? null : 'tag')}
-                        className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 transition-colors"
-                        title="添加关联标签"
+                        className={cn(
+                          "flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                          editingAssoc === 'tag'
+                            ? "bg-purple-500/30 border-purple-500/60 text-purple-200"
+                            : "bg-purple-500/15 border-purple-500/40 text-purple-300 hover:bg-purple-500/25"
+                        )}
+                        title={editingAssoc === 'tag' ? "收起选择器" : "添加关联标签"}
                       >
-                        <Plus size={11} /> 添加标签
+                        {editingAssoc === 'tag' ? <X size={11} /> : <Plus size={11} />}
+                        {editingAssoc === 'tag' ? '收起' : '添加标签'}
                       </button>
                     )}
                   </div>
@@ -351,21 +358,16 @@ export function PropertiesPanel({
                     {asset.tags.length === 0 && <span className="text-xs text-neutral-600 italic">暂无标签</span>}
                   </div>
 
-                  {/* 添加标签选择器 */}
-                  {editingAssoc === 'tag' && unassignedTags.length > 0 && (
-                    <div className="mt-2 bg-[#161616] border border-neutral-700 rounded-md p-2 space-y-1">
-                      {unassignedTags.map(tag => (
-                        <button
-                          key={tag.id}
-                          onClick={() => addTag(tag.id)}
-                          className="w-full flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-[#252525] text-neutral-300 hover:text-white text-left transition-colors"
-                        >
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
-                          <span className="truncate">{tag.name}</span>
-                          <Check size={12} className="ml-auto text-emerald-400" />
-                        </button>
-                      ))}
-                    </div>
+                  {/* 添加标签选择器（滚动列表/循环导航，限制高度杜绝拉长页面） */}
+                  {editingAssoc === 'tag' && (
+                    <ScrollableAssociationSelector
+                      type="tag"
+                      items={unassignedTags}
+                      onSelect={addTag}
+                      onClose={() => setEditingAssoc(null)}
+                      title="待添加标签"
+                      placeholder="搜索标签 (支持 ↑↓ 循环切换)..."
+                    />
                   )}
                 </div>
 
@@ -378,10 +380,16 @@ export function PropertiesPanel({
                     {unassignedCollections.length > 0 && (
                       <button
                         onClick={() => setEditingAssoc(editingAssoc === 'collection' ? null : 'collection')}
-                        className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 transition-colors"
-                        title="添加集合"
+                        className={cn(
+                          "flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                          editingAssoc === 'collection'
+                            ? "bg-amber-500/30 border-amber-500/60 text-amber-200"
+                            : "bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25"
+                        )}
+                        title={editingAssoc === 'collection' ? "收起选择器" : "添加集合"}
                       >
-                        <Plus size={11} /> 添加集合
+                        {editingAssoc === 'collection' ? <X size={11} /> : <Plus size={11} />}
+                        {editingAssoc === 'collection' ? '收起' : '添加集合'}
                       </button>
                     )}
                   </div>
@@ -407,21 +415,16 @@ export function PropertiesPanel({
                     {asset.collections.length === 0 && <span className="text-xs text-neutral-600 italic">暂无集合</span>}
                   </div>
 
-                  {/* 添加集合选择器 */}
-                  {editingAssoc === 'collection' && unassignedCollections.length > 0 && (
-                    <div className="mt-2 bg-[#161616] border border-neutral-700 rounded-md p-2 space-y-1">
-                      {unassignedCollections.map(col => (
-                        <button
-                          key={col.id}
-                          onClick={() => addCollection(col.id)}
-                          className="w-full flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-[#252525] text-amber-300 hover:text-amber-200 text-left transition-colors"
-                        >
-                          <Layers size={11} className="shrink-0" />
-                          <span className="truncate">{col.name}</span>
-                          <Check size={12} className="ml-auto text-emerald-400" />
-                        </button>
-                      ))}
-                    </div>
+                  {/* 添加集合选择器（滚动列表/循环导航，限制高度杜绝拉长页面） */}
+                  {editingAssoc === 'collection' && (
+                    <ScrollableAssociationSelector
+                      type="collection"
+                      items={unassignedCollections}
+                      onSelect={addCollection}
+                      onClose={() => setEditingAssoc(null)}
+                      title="待添加集合"
+                      placeholder="搜索集合 (支持 ↑↓ 循环切换)..."
+                    />
                   )}
                 </div>
               </div>
@@ -433,17 +436,34 @@ export function PropertiesPanel({
     // Bulk selection
     const totalCount = selectedAssets.length + selectedFolders.length;
     const totalSize = selectedAssets.reduce((sum, a) => sum + a.size, 0);
+
+    const handleBatchAddTag = (tagId: string) => {
+      selectedAssets.forEach(a => {
+        if (!a.tags.includes(tagId)) {
+          onUpdateAssetTags(a.id, [...a.tags, tagId]);
+        }
+      });
+    };
+
+    const handleBatchAddCollection = (colId: string) => {
+      selectedAssets.forEach(a => {
+        if (!a.collections.includes(colId)) {
+          onUpdateAssetCollections(a.id, [...a.collections, colId]);
+        }
+      });
+    };
+
     return (
-      <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col p-6 text-neutral-300 select-none">
-        <div className="flex items-center justify-center w-14 h-14 bg-neutral-800 rounded-xl mb-4 mx-auto border border-neutral-700">
-          <Copy size={28} className="text-blue-400" />
+      <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col p-5 text-neutral-300 select-none overflow-y-auto custom-scrollbar">
+        <div className="flex items-center justify-center w-12 h-12 bg-neutral-800 rounded-xl mb-3 mx-auto border border-neutral-700">
+          <Copy size={24} className="text-blue-400" />
         </div>
-        <h2 className="text-lg font-semibold text-white text-center mb-1">已多选 {totalCount} 项对象</h2>
-        <div className="text-center text-xs text-neutral-500 mb-6">
+        <h2 className="text-base font-semibold text-white text-center mb-1">已多选 {totalCount} 项对象</h2>
+        <div className="text-center text-xs text-neutral-500 mb-4">
           {selectedAssets.length > 0 ? `素材文件总体积 ${formatBytes(totalSize)}` : '仅选中文件夹'}
         </div>
         
-        <div className="bg-[#161616] border border-neutral-800 rounded-lg p-3 space-y-2 text-xs">
+        <div className="bg-[#161616] border border-neutral-800 rounded-lg p-3 space-y-2 text-xs mb-4">
           <div className="flex justify-between text-neutral-400">
             <span>素材文件</span>
             <span className="text-neutral-200 font-mono">{selectedAssets.length}</span>
@@ -457,6 +477,76 @@ export function PropertiesPanel({
             <span className="text-emerald-400 font-mono">{formatBytes(totalSize)}</span>
           </div>
         </div>
+
+        {selectedAssets.length > 0 && (
+          <div className="space-y-3 pt-2 border-t border-neutral-800">
+            <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">批量设置</div>
+            
+            {/* 批量打标签 */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs text-neutral-300 flex items-center gap-1">
+                  <Hash size={12} className="text-blue-400" /> 批量添加标签
+                </span>
+                <button
+                  onClick={() => setEditingAssoc(editingAssoc === 'tag' ? null : 'tag')}
+                  className={cn(
+                    "text-[10px] px-2 py-0.5 rounded border transition-colors flex items-center gap-1",
+                    editingAssoc === 'tag'
+                      ? "bg-blue-600/30 border-blue-500 text-blue-200"
+                      : "bg-neutral-800 border-neutral-700 text-neutral-300 hover:bg-neutral-700"
+                  )}
+                >
+                  {editingAssoc === 'tag' ? <X size={10} /> : <Plus size={10} />}
+                  {editingAssoc === 'tag' ? '收起' : '选择标签'}
+                </button>
+              </div>
+
+              {editingAssoc === 'tag' && (
+                <ScrollableAssociationSelector
+                  type="tag"
+                  items={state.tags}
+                  onSelect={handleBatchAddTag}
+                  onClose={() => setEditingAssoc(null)}
+                  title="批量赋予标签"
+                  placeholder="搜索标签 (支持 ↑↓ 循环切换)..."
+                />
+              )}
+            </div>
+
+            {/* 批量加集合 */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs text-neutral-300 flex items-center gap-1">
+                  <Layers size={12} className="text-amber-400" /> 批量添加集合
+                </span>
+                <button
+                  onClick={() => setEditingAssoc(editingAssoc === 'collection' ? null : 'collection')}
+                  className={cn(
+                    "text-[10px] px-2 py-0.5 rounded border transition-colors flex items-center gap-1",
+                    editingAssoc === 'collection'
+                      ? "bg-amber-600/30 border-amber-500 text-amber-200"
+                      : "bg-neutral-800 border-neutral-700 text-neutral-300 hover:bg-neutral-700"
+                  )}
+                >
+                  {editingAssoc === 'collection' ? <X size={10} /> : <Plus size={10} />}
+                  {editingAssoc === 'collection' ? '收起' : '选择集合'}
+                </button>
+              </div>
+
+              {editingAssoc === 'collection' && (
+                <ScrollableAssociationSelector
+                  type="collection"
+                  items={state.collections}
+                  onSelect={handleBatchAddCollection}
+                  onClose={() => setEditingAssoc(null)}
+                  title="批量加入集合"
+                  placeholder="搜索集合 (支持 ↑↓ 循环切换)..."
+                />
+              )}
+            </div>
+          </div>
+        )}
       </div>
     );
   }

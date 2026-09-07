@@ -3,6 +3,7 @@ import { Monitor, Filter, Plus, Settings, Hash, Layers, FolderPlus } from 'lucid
 import { cn } from '../lib/utils';
 import { AssetState, SidebarTab, SmartFolder } from '../types';
 import { NavItem, useSidebarData, renderFolderTree, renderFlatFolders, SearchBar, getSmartIcon } from './sidebar/index';
+import { UserAccountBar } from './UserAccountBar';
 
 interface SidebarProps {
   state: AssetState;
@@ -23,6 +24,7 @@ interface SidebarProps {
   onOpenSettings: () => void;
   onScanLocalFolder: () => void;
   smartFolders: SmartFolder[];
+  onReloadWorkspace?: () => void;
 }
 
 export function Sidebar({ 
@@ -43,7 +45,8 @@ export function Sidebar({
   onContextMenuSidebar,
   onOpenSettings,
   onScanLocalFolder,
-  smartFolders 
+  smartFolders,
+  onReloadWorkspace
 }: SidebarProps) {
 
   const [folderSearch, setFolderSearch] = useState('');
@@ -341,6 +344,8 @@ export function Sidebar({
 
         {/* Bottom Actions */}
         <div className="p-3 border-t border-neutral-800/50 shrink-0 space-y-2">
+          <UserAccountBar onReloadWorkspace={onReloadWorkspace} />
+          
           <button 
             onClick={onScanLocalFolder}
             className="w-full flex items-center justify-center gap-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 border border-blue-500/40 rounded-lg py-2 transition-colors shadow-lg shadow-blue-600/20"

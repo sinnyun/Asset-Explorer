@@ -197,4 +197,8 @@ export const apiClient: ApiProvider = {
   restartApplication(): Promise<void> {
     return getProvider().restartApplication();
   },
+  seedWorkspace(): Promise<boolean> {
+    const provider = getProvider();
+    return provider.seedWorkspace ? provider.seedWorkspace() : Promise.resolve(false);
+  },
 };

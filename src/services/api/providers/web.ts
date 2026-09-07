@@ -14,7 +14,7 @@ import type {
   AssetState, StorageStats,
 } from '../../../types';
 import type { ApiProvider, ScanResult } from '../types';
-import { normalizeFolders, normalizeAssets } from '../utils';
+import { normalizeFolders, normalizeAssets, normalizeSmartFolders } from '../utils';
 
 /** Web API 统一响应结构 */
 export interface ApiResponse<T> {
@@ -63,9 +63,11 @@ function getApiBaseUrl(): string {
 async function getAuthToken(): Promise<string | null> {
   try {
     const { auth } = await import('../../../lib/firebase');
+    if (typeof auth.authStateReady === 'function') {
+      await auth.authStateReady();
+    }
     const user = auth.currentUser;
     if (!user) {
-      console.warn('[WebApi] 用户未登录，无法获取认证令牌');
       return null;
     }
     return await user.getIdToken();
@@ -87,6 +89,11 @@ async function apiRequest<T>(
 
   const token = await getAuthToken();
 
+  // 如果请求需要认证但未登录，避免产生 401 报错网络风暴
+  if (!token && !endpoint.startsWith('/api/public') && endpoint !== '/api/health') {
+    return { success: false, error: 'Unauthorized: Not logged in' };
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
@@ -105,7 +112,6 @@ async function apiRequest<T>(
     });
 
     if (response.status === 401) {
-      console.warn('[WebApi] 认证失败（401）');
       return { success: false, error: 'Unauthorized' };
     }
 
@@ -140,12 +146,35 @@ class WebApiProvider implements ApiProvider {
   // 数据加载与扫描
   // ------------------------------------------------------------------------
 
-  /** 加载完整工作区数据（Express + PostgreSQL） */
+  /** 加载完整工作区数据（未登录或网络失败时优雅降级到演示数据） */
   async loadWorkspace(): Promise<Partial<AssetState>> {
+    const token = await getAuthToken();
+
+    // 1. 未登录状态：直接加载演示数据，杜绝 401 报错与白屏
+    if (!token) {
+      console.info('[WebApi] 用户未登录，加载演示工作区');
+      const { mockFolders, mockTags, mockCollections, mockAssets } = await import('../../../data');
+      return {
+        folders: normalizeFolders(mockFolders),
+        tags: mockTags,
+        collections: mockCollections,
+        customSmartFolders: [],
+        assets: normalizeAssets(mockAssets),
+      };
+    }
+
+    // 2. 已登录状态：从云端 PostgreSQL 加载用户个人资产
     const result = await apiRequest<WebWorkspacePayload>('/api/workspace');
     if (!result.success || !result.data) {
-      console.warn('[WebApi] 加载工作区失败:', result.error);
-      return { folders: [], tags: [], collections: [], customSmartFolders: [], assets: [] };
+      console.warn('[WebApi] 云端工作区加载失败，降级展示本地演示数据:', result.error);
+      const { mockFolders, mockTags, mockCollections, mockAssets } = await import('../../../data');
+      return {
+        folders: normalizeFolders(mockFolders),
+        tags: mockTags,
+        collections: mockCollections,
+        customSmartFolders: [],
+        assets: normalizeAssets(mockAssets),
+      };
     }
 
     const { folders, tags, collections, assets, smartFolders } = result.data;
@@ -154,9 +183,17 @@ class WebApiProvider implements ApiProvider {
       folders: normalizeFolders(folders || []),
       tags: tags || [],
       collections: collections || [],
-      customSmartFolders: smartFolders || [],
+      customSmartFolders: normalizeSmartFolders(smartFolders || []),
       assets: normalizeAssets(assets || []),
     };
+  }
+
+  /** 一键初始化示例工作区数据（Web端首次登录提供） */
+  async seedWorkspace(): Promise<boolean> {
+    const result = await apiRequest<{ success: boolean; seeded: boolean }>('/api/workspace/seed', {
+      method: 'POST',
+    });
+    return !!result.data?.seeded;
   }
 
   /** Web 模式暂不支持本地目录扫描 */

@@ -2,13 +2,14 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import { useMemo } from 'react';
+import { useMemo, useDeferredValue } from 'react';
 import type { Asset, AssetState, Folder, SmartFolder } from '../types';
 
 /**
  * 根据当前激活的筛选条件，计算过滤后的资产列表与文件夹列表
  *
  * 优化：
+ * - 引入 React 18 的 useDeferredValue 解耦高频键入与 CPU 密集型过滤，避免输入卡顿
  * - 子文件夹树展开改为一次构建全量映射缓存 + 递归，避免每次资产过滤重复 filter
  * - 预计算 tag/collection 名称到 ID 的映射，避免在每条资产匹配时线性扫描
  */
@@ -16,6 +17,9 @@ export function useAssetFiltering(
   state: AssetState,
   smartFolders: SmartFolder[]
 ): { filteredAssets: Asset[]; filteredFolders: Folder[] } {
+  // 使用 React 18 并发特性，让搜索输入框保持 60fps 响应，复杂过滤异步延迟计算
+  const deferredSearchQuery = useDeferredValue(state.searchQuery);
+
   const filteredAssets = useMemo(() => {
     let result = state.assets;
 
@@ -109,12 +113,15 @@ export function useAssetFiltering(
       result = result.filter(a => a.collections.includes(state.activeCollectionId!));
     }
 
-    if (state.searchQuery) {
-      result = result.filter(a => a.name.toLowerCase().includes(state.searchQuery.toLowerCase()));
+    if (deferredSearchQuery) {
+      const queryLower = deferredSearchQuery.toLowerCase().trim();
+      if (queryLower) {
+        result = result.filter(a => (a.name || '').toLowerCase().includes(queryLower));
+      }
     }
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.assets, state.activeFolderId, state.activeSmartFolderId, state.activeTagId, state.activeCollectionId, state.searchQuery, state.folders, state.includeSubfolders, state.customSmartFolders, state.tags, state.collections, smartFolders]);
+  }, [state.assets, state.activeFolderId, state.activeSmartFolderId, state.activeTagId, state.activeCollectionId, deferredSearchQuery, state.folders, state.includeSubfolders, state.customSmartFolders, state.tags, state.collections, smartFolders]);
 
   const filteredFolders = useMemo(() => {
     if (state.activeTagId) {

@@ -140,20 +140,20 @@ fn build_asset(
     let id = format!("ast_{}", stable_hash(&file_str));
 
     // ==================================================================
-    // 元数据提取链路：接入 extract_metadata，计算 SHA256 与图片尺寸
+    // 元数据提取链路：接入 extract_metadata，计算图片尺寸与必要哈希
+    // 关键性能优化：初次扫描时仅对 <= 2MB 的小文件同步计算 SHA-256。
+    // 大文件（如十几MB的照片或视频）避免全量流式读取，杜绝磁盘 I/O 堵塞
     // ==================================================================
     let (width, height, file_hash) = if should_extract_deep_metadata(&asset_type) {
         let meta = metadata_extractor::extract_metadata(file_path);
-        // 只对图片/音频/视频等媒体格式计算 SHA-256
-        let hash = if file_size < 100 * 1024 * 1024 {
+        let hash = if file_size <= 2 * 1024 * 1024 {
             metadata_extractor::compute_sha256(file_path).ok()
         } else {
-            None // 超大文件跳过哈希计算，避免 IO 阻塞
+            None // 大媒体文件跳过全量哈希计算，秒级完成初次入库
         };
         (meta.width, meta.height, hash)
     } else {
-        // 非图片/文档格式：仅在文件较小时计算哈希用于重复检测
-        let hash = if file_size < 50 * 1024 * 1024 {
+        let hash = if file_size <= 1024 * 1024 {
             metadata_extractor::compute_sha256(file_path).ok()
         } else {
             None

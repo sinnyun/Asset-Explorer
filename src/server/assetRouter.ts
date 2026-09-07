@@ -56,12 +56,10 @@ assetRouter.post("/assets/batch-delete", requireAuth, async (req: AuthRequest, r
       return res.status(400).json({ error: "ids must be a non-empty array" });
     }
 
-    // 逐条删除（同时清理关联表）
-    for (const assetId of ids) {
-      await db.delete(assetTags).where(eq(assetTags.assetId, assetId));
-      await db.delete(assetCollections).where(eq(assetCollections.assetId, assetId));
-      await db.delete(assets).where(and(eq(assets.id, assetId), eq(assets.userId, userId)));
-    }
+    // 批量集中清理关联表与资产主表，避免 N*3 串行数据库往返
+    await db.delete(assetTags).where(inArray(assetTags.assetId, ids));
+    await db.delete(assetCollections).where(inArray(assetCollections.assetId, ids));
+    await db.delete(assets).where(and(inArray(assets.id, ids), eq(assets.userId, userId)));
 
     res.json({ success: true, deletedCount: ids.length });
   } catch (error: any) {
@@ -129,18 +127,20 @@ assetRouter.put("/assets/:id/collections", requireAuth, async (req: AuthRequest,
 /** 批量添加标签到多个资产 */
 assetRouter.post("/assets/batch-tags", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.uid;
     const { assetIds, tagIds } = req.body;
-    if (!Array.isArray(assetIds) || !Array.isArray(tagIds) || assetIds.length === 0) {
+    if (!Array.isArray(assetIds) || !Array.isArray(tagIds) || assetIds.length === 0 || tagIds.length === 0) {
       return res.status(400).json({ error: "assetIds and tagIds must be non-empty arrays" });
     }
 
-    for (const assetId of assetIds) {
-      for (const tagId of tagIds) {
-        await db.insert(assetTags).values({ assetId, tagId }).onConflictDoNothing();
-      }
+    // 内存中组装笛卡尔积批处理记录，单条 SQL 批量插入消除 N+1 延迟
+    const records = assetIds.flatMap(assetId =>
+      tagIds.map(tagId => ({ assetId, tagId }))
+    );
+
+    if (records.length > 0) {
+      await db.insert(assetTags).values(records).onConflictDoNothing();
     }
-    res.json({ success: true, added: assetIds.length * tagIds.length });
+    res.json({ success: true, count: records.length });
   } catch (error: any) {
     console.error("[API] 批量添加资产标签失败:", error);
     res.status(500).json({ error: error.message || "Failed to batch add asset tags" });
@@ -150,18 +150,20 @@ assetRouter.post("/assets/batch-tags", requireAuth, async (req: AuthRequest, res
 /** 批量添加集合到多个资产 */
 assetRouter.post("/assets/batch-collections", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.uid;
     const { assetIds, collectionIds } = req.body;
-    if (!Array.isArray(assetIds) || !Array.isArray(collectionIds) || assetIds.length === 0) {
+    if (!Array.isArray(assetIds) || !Array.isArray(collectionIds) || assetIds.length === 0 || collectionIds.length === 0) {
       return res.status(400).json({ error: "assetIds and collectionIds must be non-empty arrays" });
     }
 
-    for (const assetId of assetIds) {
-      for (const colId of collectionIds) {
-        await db.insert(assetCollections).values({ assetId, collectionId: colId }).onConflictDoNothing();
-      }
+    // 内存中组装笛卡尔积批处理记录，单条 SQL 批量插入消除 N+1 延迟
+    const records = assetIds.flatMap(assetId =>
+      collectionIds.map(colId => ({ assetId, collectionId: colId }))
+    );
+
+    if (records.length > 0) {
+      await db.insert(assetCollections).values(records).onConflictDoNothing();
     }
-    res.json({ success: true, added: assetIds.length * collectionIds.length });
+    res.json({ success: true, count: records.length });
   } catch (error: any) {
     console.error("[API] 批量添加资产集合失败:", error);
     res.status(500).json({ error: error.message || "Failed to batch add asset collections" });

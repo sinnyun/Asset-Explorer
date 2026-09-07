@@ -60,6 +60,9 @@ export interface ApiProvider {
   /** 懒加载获取资产缩略图（base64 data URL） */
   getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null>;
 
+  /** 初始化示例工作区数据（Web端登录云端提供一键导入） */
+  seedWorkspace?(): Promise<boolean>;
+
   /** 校验资产有效性（删除数据库中文件已不存在的记录） */
   validateAssets(): Promise<void>;
 

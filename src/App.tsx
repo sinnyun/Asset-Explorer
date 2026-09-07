@@ -142,6 +142,16 @@ export default function App() {
     await scanAndAddFolder(folderPath, folderName, isMonitored, state, setState);
   };
 
+  const handleReloadWorkspace = async () => {
+    try {
+      const loaded = await dataService.loadWorkspace();
+      if (loaded && ('assets' in loaded || 'folders' in loaded)) {
+        setState(prev => ({ ...prev, ...loaded }));
+      }
+    } catch (err) {
+      console.error('[App] 重新加载工作区失败:', err);
+    }
+  };
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#141414] text-neutral-200 font-sans">
@@ -164,6 +174,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onScanLocalFolder={handleScanLocalFolder}
         smartFolders={smartFolders}
+        onReloadWorkspace={handleReloadWorkspace}
       />
       <MainArea 
         state={state} 

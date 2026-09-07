@@ -60,10 +60,34 @@ export function useScanMonitor(
   // 开始扫描时由调用方基于当时状态探测到的父级文件夹 ID，供 scan:started 合并层级用
   const pendingParentIdRef = useRef<string | undefined>(undefined);
 
+  // 性能优化：增量微批次缓冲区与防抖定时器，防止高频 scan:chunk 导致 React 发生渲染雪崩与主线程假死
+  const pendingAssetsBufferRef = useRef<any[]>([]);
+  const flushTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!runtime.isDesktop) return;
 
     let unlisteners: Array<() => void> = [];
+
+    // 将缓冲区中的新资产一次性批量合并进 React State
+    const flushBufferToState = () => {
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      if (pendingAssetsBufferRef.current.length === 0) return;
+
+      const buffer = pendingAssetsBufferRef.current;
+      pendingAssetsBufferRef.current = [];
+      const normalized = normalizeAssets(buffer);
+
+      setState((prev) => {
+        const existing = new Set(prev.assets.map((a) => a.id));
+        const toAdd = normalized.filter((a) => !existing.has(a.id));
+        if (toAdd.length === 0) return prev;
+        return { ...prev, assets: [...prev.assets, ...toAdd] };
+      });
+    };
 
     const setup = async () => {
       try {
@@ -114,27 +138,29 @@ export function useScanMonitor(
           pendingParentIdRef.current = undefined;
         });
 
-        // ---- scan:chunk：每批资产增量到达，直接合并进界面（边扫边显示） ----
+        // ---- scan:chunk：资产推入缓冲池，120ms 平滑批量刷入 State ----
         const unChunk = await listen<any>('scan:chunk', (ev) => {
           const payload = ev.payload || {};
           const assets: any[] = payload.assets || [];
           const done: number = payload.done ?? 0;
           const total: number = payload.total ?? 0;
+          
+          // 进度数值轻量更新（单字段低开销）
           setProgress((prev) => ({ ...prev, done, total }));
 
           if (assets.length > 0) {
-            const normalized = normalizeAssets(assets);
-            setState((prev) => {
-              const existing = new Set(prev.assets.map((a) => a.id));
-              const toAdd = normalized.filter((a) => !existing.has(a.id));
-              if (toAdd.length === 0) return prev;
-              return { ...prev, assets: [...prev.assets, ...toAdd] };
-            });
+            pendingAssetsBufferRef.current.push(...assets);
+
+            // 120ms 节流窗口：如果定时器未挂起，则调度一次批量刷入
+            if (!flushTimerRef.current) {
+              flushTimerRef.current = window.setTimeout(flushBufferToState, 120);
+            }
           }
         });
 
-        // ---- scan:finished：全部完成，短暂停留后隐藏进度条 ----
+        // ---- scan:finished：全部完成，先清空剩余缓冲区，短暂停留后隐藏进度条 ----
         const unFinished = await listen<any>('scan:finished', (ev) => {
+          flushBufferToState();
           const payload = ev.payload || {};
           const root: any = payload.root_folder;
           setProgress((prev) => ({
@@ -148,8 +174,9 @@ export function useScanMonitor(
           setTimeout(() => setProgress((prev) => ({ ...prev, active: false })), 1500);
         });
 
-        // ---- scan:failed：出错后提示并隐藏 ----
+        // ---- scan:failed：出错后清空剩余缓冲并提示 ----
         const unFailed = await listen<any>('scan:failed', (ev) => {
+          flushBufferToState();
           const payload = ev.payload || {};
           setProgress((prev) => ({
             ...prev,
@@ -169,6 +196,9 @@ export function useScanMonitor(
     setup();
 
     return () => {
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+      }
       unlisteners.forEach((fn) => { if (fn) fn(); });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
