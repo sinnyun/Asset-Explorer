@@ -139,20 +139,42 @@ class DesktopApiProvider implements ApiProvider {
 
   /** 懒加载获取资产缩略图 (优先使用 Tauri 原生 asset 协议，避免 Base64 IPC 内存开销) */
   async getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
-    // 场景 1：已有缩略图缓存本地路径 → 优先使用 convertFileSrc 零拷贝流式渲染
+    // ================================================================
+    // 场景 1：已有缩略图缓存路径 → 验证文件确实存在于磁盘后再使用
+    // convertFileSrc 零拷贝流式渲染。
+    //
+    // 【修复原因】数据库中的 thumbnailUrl 可能已失效：
+    //   ① 用户手动清理了缩略图缓存目录
+    //   ② 数据迁移后 DB 未同步更新 thumbnailUrl 路径
+    //   ③ 外接存储盘符变更导致路径失效
+    // 此时直接 convertFileSrc 会返回一个 404 的 asset:// URL。
+    // 因此必须通过 Rust IPC 做文件存在性校验，保证 URL 可用。
+    // ================================================================
     if (existingThumbnailUrl) {
-      try {
-        const { convertFileSrc } = await import('@tauri-apps/api/core');
-        const assetUrl = convertFileSrc(existingThumbnailUrl);
-        if (assetUrl) return assetUrl;
-      } catch {
-        // 降级使用 base64
+      // 通过 Rust IPC 轻量检查文件是否存在（仅 stat，不读取内容）
+      const fileExists = await callRust<boolean>('file_exists', { filePath: existingThumbnailUrl });
+      if (fileExists) {
+        try {
+          const { convertFileSrc } = await import('@tauri-apps/api/core');
+          const assetUrl = convertFileSrc(existingThumbnailUrl);
+          if (assetUrl) return assetUrl;
+        } catch {
+          // convertFileSrc 导入失败 → 降级使用 base64
+        }
+        // 降级：通过 IPC 读取为 base64 data URL
+        const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: existingThumbnailUrl });
+        if (dataUrl) return dataUrl;
       }
-      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: existingThumbnailUrl });
-      if (dataUrl) return dataUrl;
+      // 缓存文件不存在 → 自动降级到场景 2 重新生成
     }
 
-    // 场景 2：调用 Rust 从源文件生成缩略图，返回生成的缓存路径
+    // ================================================================
+    // 场景 2：调用 Rust 从源文件生成/获取缩略图。
+    // generate_or_get_thumbnail 内部会检查缓存文件是否存在：
+    //   - 已存在 → 立即返回路径（快速命中）
+    //   - 不存在 → 自动重新生成并更新数据库中的 thumbnailUrl
+    // 因此本方法返回的路径一定是当前数据目录中真实有效的文件。
+    // ================================================================
     const thumbPath = await callRust<string>('get_thumbnail', { assetId, path, maxDimension: 256 });
     if (thumbPath) {
       try {
@@ -160,10 +182,25 @@ class DesktopApiProvider implements ApiProvider {
         const assetUrl = convertFileSrc(thumbPath);
         if (assetUrl) return assetUrl;
       } catch {
-        // 降级使用 base64
+        // convertFileSrc 导入失败 → 降级使用 base64
       }
       const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: thumbPath });
       if (dataUrl) return dataUrl;
+    }
+
+    // ================================================================
+    // 兜底：get_thumbnail 失败（如源文件已被移动/删除），
+    // 但 existingThumbnailUrl 可能仍指向独立有效的缩略图缓存，
+    // 尝试使用 convertFileSrc 尽力展示已有缩略图。
+    // ================================================================
+    if (existingThumbnailUrl) {
+      try {
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        const assetUrl = convertFileSrc(existingThumbnailUrl);
+        if (assetUrl) return assetUrl;
+      } catch {
+        // ignore - return null below
+      }
     }
     return null;
   }
