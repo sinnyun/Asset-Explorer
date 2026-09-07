@@ -70,6 +70,7 @@ type AssocMap = HashMap<String, Vec<String>>;
 impl Database {
     /// 初始化并连接本地 SQLite 数据库文件
     /// 自动从 app_config.json 读取自定义或默认存储路径
+    /// 若数据库文件已损坏，自动备份损坏文件并重建全新数据库
     pub fn init() -> Result<Self, String> {
         let db_dir = get_active_data_dir();
         let _ = fs::create_dir_all(&db_dir);
@@ -77,6 +78,71 @@ impl Database {
         let db_path = db_dir.join("assethub.db");
         println!("[Database] 打开本地 SQLite 数据库: {:?}", db_path);
 
+        // 若主库文件存在但已损坏，自动备份并重建
+        if db_path.exists() {
+            // 尝试快速完整性检测：仅验证 DB 文件头与表结构页可读
+            match Connection::open(&db_path) {
+                Ok(test_conn) => {
+                    // 尝试简单查询验证数据库可用性（schema 可读即视为基本健康）
+                    let check = test_conn.query_row(
+                        "SELECT 1 FROM sqlite_master LIMIT 1",
+                        [],
+                        |r| r.get::<_, i32>(0),
+                    );
+                    match check {
+                        Ok(_) => {
+                            // 数据库 schema 可读；再执行 quick_check 检测数据页完整性
+                            let quick_check_ok = test_conn
+                                .query_row("PRAGMA quick_check", [], |row| {
+                                    row.get::<_, String>(0)
+                                })
+                                .map(|result| result.trim().starts_with("ok"))
+                                .unwrap_or(false);
+                            if !quick_check_ok {
+                                // DB 文件损坏：备份原文件后重建
+                                eprintln!("[Database] 检测到数据库文件损坏 (PRAGMA quick_check), 正在备份并重建...");
+                                let backup_name = format!("assethub_corrupt_{}.db",
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0));
+                                let backup_path = db_dir.join(backup_name);
+                                if let Err(e) = fs::rename(&db_path, &backup_path) {
+                                    // rename 失败（如文件被占用），则跳过重建，尝试继续使用
+                                    eprintln!("[Database] 备份损坏数据库失败: {}, 将继续使用原文件", e);
+                                } else {
+                                    println!("[Database] 已备份损坏数据库至: {:?}", backup_path);
+                                    // 清理可能损坏的 WAL/SHM 文件
+                                    let _ = fs::remove_file(db_dir.join("assethub.db-wal"));
+                                    let _ = fs::remove_file(db_dir.join("assethub.db-shm"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // schema 不可读，数据库可能完全损坏
+                            eprintln!("[Database] 数据库 schema 读取失败: {}, 备份并重建...", e);
+                            let backup_name = format!("assethub_corrupt_{}.db",
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0));
+                            let backup_path = db_dir.join(backup_name);
+                            let _ = fs::rename(&db_path, &backup_path);
+                            let _ = fs::remove_file(db_dir.join("assethub.db-wal"));
+                            let _ = fs::remove_file(db_dir.join("assethub.db-shm"));
+                        }
+                    }
+                }
+                Err(_) => {
+                    // 文件无法打开（可能 0 字节或非 SQLite 格式）
+                    let backup_path = db_dir.join("assethub_corrupt.db");
+                    let _ = fs::rename(&db_path, &backup_path);
+                    eprintln!("[Database] 数据库文件无法打开，已备份并重建: {:?}", backup_path);
+                }
+            }
+        }
+
+        // 打开（可能刚重建的）数据库
         let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {}", e))?;
 
         // 开启 WAL 高并发写入模式和外键约束
@@ -97,11 +163,15 @@ impl Database {
     }
 
     /// 内存数据库初始化 (用于测试或快速启动备用)
-    pub fn init_in_memory() -> Result<Self, String> {
+    /// data_dir 参数用于指定关联的数据目录（缩略图缓存等），
+    /// 默认使用全局激活的数据目录，避免缩略图路径解析错误。
+    pub fn init_in_memory(data_dir: Option<PathBuf>) -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        let dir = data_dir.unwrap_or_else(get_active_data_dir);
+        let _ = fs::create_dir_all(&dir);
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
-            data_dir: PathBuf::from(":memory:"),
+            data_dir: dir,
         };
         db.migrate_schema()?;
         Ok(db)
