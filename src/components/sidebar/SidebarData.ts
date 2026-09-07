@@ -32,31 +32,59 @@ export function useSidebarData(
 
   const smartCounts = useMemo(() => {
     const map = new Map<string, number>();
+    
+    const assets = state.assets;
+
     for (const sf of smartFolders) {
       if (sf.filter) {
-        map.set(sf.id, state.assets.filter(sf.filter).length);
+        let count = 0;
+        for (const asset of assets) {
+          if (sf.filter(asset)) count++;
+        }
+        map.set(sf.id, count);
       }
     }
     for (const csf of state.customSmartFolders) {
-      if (csf.rules) {
-        const count = state.assets.filter(asset => {
-          if (csf.rules!.length === 0) return true;
-          const matches = csf.rules!.map(rule => {
+      if (csf.rules && csf.rules.length > 0) {
+        // 预计算每条规则的 tag/collection ID 匹配集（子串匹配语义与原版一致）
+        const precomputed = csf.rules.map(rule => {
+          if (rule.type === 'tag') {
+            const valLower = rule.value.toLowerCase();
+            const ids = new Set<string>();
+            for (const t of state.tags) {
+              if (t.name.toLowerCase().includes(valLower)) ids.add(t.id);
+            }
+            return { rule, tagIds: ids, colIds: new Set<string>() };
+          }
+          if (rule.type === 'collection') {
+            const valLower = rule.value.toLowerCase();
+            const ids = new Set<string>();
+            for (const c of state.collections) {
+              if (c.name.toLowerCase().includes(valLower)) ids.add(c.id);
+            }
+            return { rule, tagIds: new Set<string>(), colIds: ids };
+          }
+          return { rule, tagIds: new Set<string>(), colIds: new Set<string>() };
+        });
+
+        let count = 0;
+        for (const asset of assets) {
+          const matches = precomputed.map(p => {
+            const { rule } = p;
             if (rule.type === 'name') return asset.name.toLowerCase().includes(rule.value.toLowerCase());
-            if (rule.type === 'tag') {
-              const tag = state.tags.find(t => t.name.toLowerCase().includes(rule.value.toLowerCase()));
-              return tag ? asset.tags.includes(tag.id) : false;
-            }
-            if (rule.type === 'collection') {
-              const col = state.collections.find(c => c.name.toLowerCase().includes(rule.value.toLowerCase()));
-              return col ? asset.collections.includes(col.id) : false;
-            }
+            if (rule.type === 'tag') return asset.tags.some(tid => p.tagIds.has(tid));
+            if (rule.type === 'collection') return asset.collections.some(cid => p.colIds.has(cid));
             if (rule.type === 'type') return asset.type.toLowerCase() === rule.value.toLowerCase();
             return false;
           });
-          return csf.matchAll ? matches.every(Boolean) : matches.some(Boolean);
-        }).length;
+          if (csf.matchAll ? matches.every(Boolean) : matches.some(Boolean)) {
+            count++;
+          }
+        }
         map.set(csf.id, count);
+      } else if (csf.rules && csf.rules.length === 0) {
+        // 无规则 = 匹配全部
+        map.set(csf.id, assets.length);
       }
     }
     return map;

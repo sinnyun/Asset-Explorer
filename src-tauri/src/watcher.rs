@@ -21,11 +21,15 @@ use std::time::Duration;
 use tauri::Emitter;
 
 /// 发送给前端的事件载荷
+/// - added / modified: 携带完整资产对象，前端可直接增量合并进状态（无需全量重载）
+/// - removed: 仅携带 asset_id 与 path，前端按 ID 增量删除
 #[derive(Clone, Serialize)]
 pub struct AssetChangeEvent {
     pub asset_id: Option<String>,
     pub path: String,
     pub action: String, // "added" | "removed" | "modified"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<crate::models::Asset>,
 }
 
 /// 启动文件监控器，监听所有已监控文件夹的变更
@@ -147,15 +151,35 @@ fn handle_batch_file_events(
 
     // 批量处理删除事件
     if !removals.is_empty() {
+        // 先查每个待删路径的 asset_id，事件中携带 → 前端可按 ID 精确增量删除
+        let mut removed_ids: Vec<(String, String)> = Vec::new(); // (asset_id, path)
+        for path_str in &removals {
+            if let Ok(Some(asset)) = db.get_asset_by_path(path_str) {
+                removed_ids.push((asset.id, path_str.clone()));
+            }
+        }
+
         let deleted = db.delete_assets_by_paths(&removals)?;
         if deleted > 0 {
             println!("[Watcher] 批量删除 {} 个文件", deleted);
-            for path in &removals {
+            for (asset_id, path) in removed_ids {
                 let _ = app_handle.emit("asset:removed", AssetChangeEvent {
-                    asset_id: None,
-                    path: path.clone(),
+                    asset_id: Some(asset_id),
+                    path,
                     action: "removed".to_string(),
+                    asset: None,
                 });
+            }
+            // 数据库中可能还存在未能查到 asset_id 的记录（如被外部修改），按 path 兜底广播
+            for path in &removals {
+                if !removed_ids.iter().any(|(_, p)| p == path) {
+                    let _ = app_handle.emit("asset:removed", AssetChangeEvent {
+                        asset_id: None,
+                        path: path.clone(),
+                        action: "removed".to_string(),
+                        asset: None,
+                    });
+                }
             }
         }
     }
@@ -199,26 +223,24 @@ fn handle_file_added(app_handle: &tauri::AppHandle, db: &Database, path: &Path) 
     }
 
     // 扫描新文件并添加到数据库
-    let asset = create_asset_from_path(path)?;
-    // 使用批量保存函数（仅一个资产）
-    db.batch_save_scan_results(
-        &crate::models::Folder {
-            id: String::new(),
-            name: String::new(),
-            path: String::new(),
-            parent_id: None,
-            is_monitored: false,
-            asset_count: None,
-        },
-        &[],
-        &[asset.clone()],
-    )?;
+    let mut asset = create_asset_from_path(path)?;
 
-    // 发送事件给前端
+    // 根据路径前缀找到正确的父文件夹并设置 folder_id
+    // 这样前端增量合并时 asset.folderId 正确关联
+    let folders = db.get_folders()?;
+    if let Some(parent_folder_id) = find_matching_folder(&folders, &path_str) {
+        asset.folder_id = parent_folder_id;
+    }
+
+    // 持久化单个资产（UPSERT 幂等）
+    db.batch_save_assets(&[asset.clone()])?;
+
+    // 发送事件给前端（携带完整资产数据 → 前端可直接增量合并，无需全量重载）
     let _ = app_handle.emit("asset:added", AssetChangeEvent {
-        asset_id: Some(asset.id),
+        asset_id: Some(asset.id.clone()),
         path: path_str.clone(),
         action: "added".to_string(),
+        asset: Some(asset.clone()),
     });
     println!("[Watcher] 新文件已添加: {}", path_str);
     Ok(())
@@ -246,10 +268,17 @@ fn handle_file_modified(app_handle: &tauri::AppHandle, db: &Database, path: &Pat
         db.update_asset_field(&existing.id, "date_modified", &new_date)?;
         db.update_asset_field(&existing.id, "size", &metadata.len().to_string())?;
 
+        // 构造完整的最新资产对象（更新 date_modified 与 size 后再广播）
+        let updated_asset = crate::models::Asset {
+            size: metadata.len(),
+            date_modified: new_date.clone(),
+            ..existing.clone()
+        };
         let _ = app_handle.emit("asset:modified", AssetChangeEvent {
-            asset_id: Some(existing.id),
+            asset_id: Some(existing.id.clone()),
             path: path_str.clone(),
             action: "modified".to_string(),
+            asset: Some(updated_asset),
         });
         println!("[Watcher] 文件已更新: {}", path_str);
     }
@@ -304,4 +333,28 @@ fn create_asset_from_path(path: &Path) -> Result<crate::models::Asset, String> {
         file_hash: None,
         thumbnail_url: None,
     })
+}
+
+/// 根据文件路径找到最匹配的文件夹（路径前缀最长匹配）
+/// 用于新增文件时正确设置 asset.folder_id
+fn find_matching_folder(folders: &[crate::models::Folder], file_path: &str) -> Option<String> {
+    let file_lower = file_path.trim_end_matches(|c| c == '/' || c == '\\').to_lowercase();
+    let mut best_match: Option<(usize, String)> = None; // (path_len, folder_id)
+    
+    for folder in folders {
+        let fp = folder.path.trim_end_matches(|c| c == '/' || c == '\\').to_lowercase();
+        // 检查文件路径是否以该文件夹路径为前缀（考虑路径分隔符）
+        if file_lower == fp {
+            continue; // 文件路径不可能等于文件夹路径
+        }
+        if file_lower.starts_with(&format!("{}/", fp)) || file_lower.starts_with(&format!("{}\\", fp)) {
+            let prefix_len = fp.len();
+            // 选择路径前缀最长的匹配（最深的文件夹）
+            if best_match.as_ref().map_or(true, |(len, _)| prefix_len > *len) {
+                best_match = Some((prefix_len, folder.id.clone()));
+            }
+        }
+    }
+    
+    best_match.map(|(_, id)| id)
 }

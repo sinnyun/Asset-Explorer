@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Folder as FolderIcon, Pin, PinOff, ArrowUp, ArrowDown, Trash2, 
   Map, ExternalLink, Copy, HardDrive, Layers, Hash, Check, FolderCheck, 
@@ -34,16 +34,29 @@ export function FolderProperties({
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [copiedPath, setCopiedPath] = useState(false);
 
-  // Sibling folders for moving up/down
-  const siblings = allFolders.filter(f => f.parentId === folder.parentId);
-  const siblingIndex = siblings.findIndex(f => f.id === folder.id);
+  // useMemo 优化：仅当依赖变化时重新计算
+  const siblings = useMemo(
+    () => allFolders.filter(f => f.parentId === folder.parentId),
+    [allFolders, folder.parentId]
+  );
+  const siblingIndex = useMemo(() => siblings.findIndex(f => f.id === folder.id), [siblings, folder.id]);
   const canMoveUp = siblingIndex > 0;
   const canMoveDown = siblingIndex >= 0 && siblingIndex < siblings.length - 1;
 
   // Folder content stats
-  const folderAssets = assets.filter(a => a.folderId === folder.id);
-  const childFolders = allFolders.filter(f => f.parentId === folder.id);
-  const totalSizeBytes = folderAssets.reduce((sum, a) => sum + a.size, 0);
+  const folderAssets = useMemo(
+    () => assets.filter(a => a.folderId === folder.id),
+    [assets, folder.id]
+  );
+  const childFolders = useMemo(
+    () => allFolders.filter(f => f.parentId === folder.id),
+    [allFolders, folder.id]
+  );
+  const totalSizeBytes = useMemo(() => {
+    let sum = 0;
+    for (const a of folderAssets) sum += a.size;
+    return sum;
+  }, [folderAssets]);
 
   const handleCopyPath = () => {
     navigator.clipboard.writeText(folder.path);

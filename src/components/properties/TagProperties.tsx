@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Hash, Pin, PinOff, ArrowUp, ArrowDown, Trash2, Tag as TagIcon, 
   Layers, HardDrive, Calendar, Check, ExternalLink, Image as ImageIcon 
 } from 'lucide-react';
@@ -45,9 +45,20 @@ export function TagProperties({
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   // Filter assets and folders containing this tag
-  const taggedAssets = assets.filter(a => a.tags.includes(tag.id));
-  const taggedFolders = folders.filter(f => f.tags.includes(tag.id));
-  const totalSizeBytes = taggedAssets.reduce((sum, a) => sum + a.size, 0);
+  // useMemo 优化计算
+  const taggedAssets = useMemo(
+    () => assets.filter(a => a.tags.includes(tag.id)),
+    [assets, tag.id]
+  );
+  const taggedFolders = useMemo(
+    () => folders.filter(f => f.tags.includes(tag.id)),
+    [folders, tag.id]
+  );
+  const totalSizeBytes = useMemo(() => {
+    let sum = 0;
+    for (const a of taggedAssets) sum += a.size;
+    return sum;
+  }, [taggedAssets]);
 
   // Order index and moving capability
   const currentIndex = allTags.findIndex(t => t.id === tag.id);

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   HardDrive, Calendar, Image as ImageIcon, Folder, ExternalLink, 
   Copy, Hash, Layers, Filter,
@@ -109,12 +109,21 @@ export function PropertiesPanel({
   // 底部「标签与集合」编辑弹层的展开状态：'tag' | 'collection' | null
   const [editingAssoc, setEditingAssoc] = useState<'tag' | 'collection' | null>(null);
 
-  // Combine all smart folders (built-in + custom)
-  const allSmartFolders = [...smartFolders, ...state.customSmartFolders];
+  // Combine all smart folders (built-in + custom) with useMemo
+  const allSmartFolders = useMemo(() => [...smartFolders, ...state.customSmartFolders], [smartFolders, state.customSmartFolders]);
 
-  // 1. Check selected items first
-  const selectedAssets = state.assets.filter(a => state.selectedItems.some(i => i.type === 'asset' && i.id === a.id));
-  const selectedFolders = state.folders.filter(f => state.selectedItems.some(i => i.type === 'folder' && i.id === f.id));
+  // 1. Check selected items first — 使用 useMemo 避免每次渲染全量遍历
+  const selectedAssets = useMemo(() => {
+    if (state.selectedItems.length === 0) return [];
+    const assetIds = new Set(state.selectedItems.filter(i => i.type === 'asset').map(i => i.id));
+    return state.assets.filter(a => assetIds.has(a.id));
+  }, [state.assets, state.selectedItems]);
+  
+  const selectedFolders = useMemo(() => {
+    if (state.selectedItems.length === 0) return [];
+    const folderIds = new Set(state.selectedItems.filter(i => i.type === 'folder').map(i => i.id));
+    return state.folders.filter(f => folderIds.has(f.id));
+  }, [state.folders, state.selectedItems]);
 
   // If a single folder is selected in the canvas
   if (state.selectedItems.length === 1 && selectedFolders.length === 1) {

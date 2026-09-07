@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { AssetState } from '../types';
 import { dataService } from '../services/dataService';
 
@@ -43,25 +43,39 @@ export function getInitialState(): AssetState {
 
 /**
  * App 主状态管理：初始数据加载与主题同步
+ *
+ * 优化：
+ * 1. 消除二次全量 loadWorkspace：之前 validateAssets 后再 reload 一次 workspace，
+ *    对于大资产库会做 2 次完整数据拉取（数百 MB JSON）。
+ *    - 方案：改为只加载一次；资产校验交给后端启动 setup 后台线程完成。
+ *    - 前端不再调用 validateAssets，因为 Rust setup 已在启动时后台执行。
+ * 2. 首次 loadWorkspace 超时保护：若 IPC 尚未就绪重试最多 3 次。
  */
 export function useAppState() {
   const [state, setState] = useState<AssetState>(getInitialState);
+  const loadAttemptRef = useRef(0);
 
-  // 1. 初始化从后端 SQLite 异步加载全量数据 (非阻塞)
+  // 1. 初始化从后端异步加载全量数据 (非阻塞，只加载一次)
   useEffect(() => {
-    dataService.loadWorkspace().then(loaded => {
-      if (loaded) {
-        setState(prev => ({ ...prev, ...loaded }));
+    const loadOnce = async () => {
+      loadAttemptRef.current += 1;
+      try {
+        const loaded = await dataService.loadWorkspace();
+        // 已成功取得数据（即使为空也是成功响应，无需重试）
+        if (loaded && ('assets' in loaded || 'folders' in loaded)) {
+          setState(prev => ({ ...prev, ...loaded }));
+        } else if (loadAttemptRef.current < 3) {
+          // loadWorkspace 返回 null/undefined → IPC 可能尚未就绪，延迟重试
+          setTimeout(loadOnce, 800);
+        }
+      } catch (err) {
+        console.error('[App] 初始化加载工作区数据失败:', err);
+        if (loadAttemptRef.current < 3) {
+          setTimeout(loadOnce, 800);
+        }
       }
-      dataService.validateAssets().then(() => {
-        dataService.loadWorkspace().then(reloaded => {
-          if (reloaded) {
-            console.log(`[App] 资产校验后重新加载: ${reloaded.assets.length} 个资产`);
-            setState(prev => ({ ...prev, ...reloaded }));
-          }
-        });
-      });
-    });
+    };
+    loadOnce();
   }, []);
 
   // Apply Theme

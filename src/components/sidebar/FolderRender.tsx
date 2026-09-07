@@ -4,6 +4,22 @@ import { cn } from '../../lib/utils';
 import type { AssetState } from '../../types';
 import { NavItem } from './NavItem';
 
+/** 文件夹树最大渲染深度（超过则截断避免递归栈溢出） */
+const MAX_FOLDER_DEPTH = 50;
+
+interface FolderTreeNode {
+  id: string;
+  parentId?: string;
+}
+
+/**
+ * 渲染文件夹树（优化版）
+ *
+ * 优化：
+ * 1. 一次遍历构建 childrenMap，递归时 O(1) 查找子节点，替代原版对每个文件夹重复 filter(O(n))
+ * 2. 限制最大递归深度，防止深层嵌套导致栈溢出
+ * 3. 每次渲染先按 isPinned 排序子文件夹
+ */
 export function renderFolderTree(
   state: AssetState,
   folderCounts: Map<string, number>,
@@ -13,44 +29,64 @@ export function renderFolderTree(
   parentId?: string,
   depth = 0
 ) {
-  const children = state.folders
-    .filter(f => f.parentId === parentId)
-    .sort((a, b) => {
-      if (Boolean(a.isPinned) === Boolean(b.isPinned)) return 0;
-      return a.isPinned ? -1 : 1;
-    });
-  if (children.length === 0) return null;
+  // 深度保护：超过 MAX_FOLDER_DEPTH 层不再向下渲染，避免递归栈溢出
+  if (depth >= MAX_FOLDER_DEPTH) {
+    return null;
+  }
 
-  return children.map(folder => {
-    const hasChildren = state.folders.some(f => f.parentId === folder.id);
-    const isExpanded = state.expandedFolderIds.includes(folder.id);
-    const directCount = folderCounts.get(folder.id);
-    
-    return (
-      <div key={folder.id}>
-        <NavItem 
-          active={state.activeFolderId === folder.id}
-          onClick={() => onSelectFolder(folder.id)}
-          icon={isExpanded 
-            ? <FolderOpen size={16} className={folder.isMonitored ? "text-blue-400" : "text-neutral-400"} />
-            : <Folder size={16} className={folder.isMonitored ? "text-blue-400" : "text-neutral-400"} />
-          }
-          label={folder.name + (folder.isMonitored ? ' (监视)' : '')}
-          count={directCount}
-          indent={depth}
-          hasChildren={hasChildren}
-          isExpanded={isExpanded}
-          isPinned={folder.isPinned}
-          onToggleExpand={() => onToggleFolderExpand(folder.id)}
-          onContextMenu={(e) => onContextMenuFolder(e, folder.id)}
-        />
-        {hasChildren && isExpanded && renderFolderTree(
-          state, folderCounts, onSelectFolder, onToggleFolderExpand, onContextMenuFolder,
-          folder.id, depth + 1
-        )}
-      </div>
-    );
-  });
+  // 一次遍历构建 父文件夹ID → 子文件夹列表 的映射
+  const childrenMap = new Map<string, Array<typeof state.folders[0]>>();
+  for (const f of state.folders) {
+    const pid = f.parentId ?? '';
+    const list = childrenMap.get(pid) || [];
+    list.push(f);
+    childrenMap.set(pid, list);
+  }
+
+  // 内部递归函数：使用预建的 childrenMap 查找子节点（O(1)）
+  const renderNode = (
+    currentParentId: string,
+    currentDepth: number
+  ): React.ReactNode => {
+    if (currentDepth >= MAX_FOLDER_DEPTH) return null;
+    const children = (childrenMap.get(currentParentId) || [])
+      .sort((a, b) => {
+        if (Boolean(a.isPinned) === Boolean(b.isPinned)) return 0;
+        return a.isPinned ? -1 : 1;
+      });
+    if (children.length === 0) return null;
+
+    return children.map(folder => {
+      const hasChildren = (childrenMap.get(folder.id) || []).length > 0;
+      const isExpanded = state.expandedFolderIds.includes(folder.id);
+      const directCount = folderCounts.get(folder.id);
+      
+      return (
+        <div key={folder.id}>
+          <NavItem 
+            active={state.activeFolderId === folder.id}
+            onClick={() => onSelectFolder(folder.id)}
+            icon={isExpanded 
+              ? <FolderOpen size={16} className={folder.isMonitored ? "text-blue-400" : "text-neutral-400"} />
+              : <Folder size={16} className={folder.isMonitored ? "text-blue-400" : "text-neutral-400"} />
+            }
+            label={folder.name + (folder.isMonitored ? ' (监视)' : '')}
+            count={directCount}
+            indent={currentDepth}
+            hasChildren={hasChildren}
+            isExpanded={isExpanded}
+            isPinned={folder.isPinned}
+            onToggleExpand={() => onToggleFolderExpand(folder.id)}
+            onContextMenu={(e) => onContextMenuFolder(e, folder.id)}
+          />
+          {hasChildren && isExpanded && renderNode(folder.id, currentDepth + 1)}
+        </div>
+      );
+    });
+  };
+
+  // 从根（undefined/null）开始渲染
+  return renderNode(parentId ?? '', depth);
 }
 
 export function renderFlatFolders(

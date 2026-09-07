@@ -118,9 +118,19 @@ class DataService {
     apiClient.createFolder(folder).catch(console.error);
   }
 
-  /** 重命名文件夹 */
+  /** 重命名文件夹：直接调用后端 rename_folder 命令，避免全量 loadWorkspace */
   async renameFolder(id: string, newName: string): Promise<void> {
-    // 先获取已有数据补全完整对象
+    // 直接通过 IPC 调用 Rust 的 rename_folder（避免 loadWorkspace 拉取全量数据）
+    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('rename_folder', { id, newName });
+        return;
+      } catch (e) {
+        console.warn('[DataService] rename_folder IPC 调用失败，降级处理:', e);
+      }
+    }
+    // 降级：Web 模式或 IPC 失败时
     const state = await apiClient.loadWorkspace();
     const target = (state.folders || []).find(f => f.id === id);
     if (target) {
@@ -131,18 +141,19 @@ class DataService {
   /**
    * 更新文件夹详细属性
    * 兼容调用方式：
-   *   - dataService.updateFolder(完整Folder对象)
-   *   - dataService.updateFolder(id, updates)
+   *   - dataService.updateFolder(完整Folder对象) — 直接调用 IPC
+   *   - dataService.updateFolder(id, updates) — 需调用方从 state 获取完整对象后传入
+   *     不再内部 loadWorkspace 全量拉取（避免大库卡顿）
    */
   async updateFolder(idOrItem: string | Folder, updates?: Partial<Folder>): Promise<void> {
     if (typeof idOrItem === 'object') {
       apiClient.updateFolder(idOrItem).catch(console.error);
     } else {
-      // 需要从现有状态中获取完整 Folder
-      const state = await apiClient.loadWorkspace();
-      const target = (state.folders || []).find(f => f.id === idOrItem);
-      if (target) {
-        apiClient.updateFolder({ ...target, ...updates }).catch(console.error);
+      console.warn('[DataService] 请勿使用 updateFolder(id, updates) 形式调用，'
+        + '应传完整 Folder 对象。为兼容旧代码，使用 rename_folder IPC 直接更新。');
+      if (updates && updates.name && Object.keys(updates).length === 1) {
+        // 仅改名场景 → 直接调用后端 rename_folder
+        await this.renameFolder(idOrItem, updates.name);
       }
     }
   }
@@ -164,18 +175,15 @@ class DataService {
   /**
    * 更新标签
    * 兼容调用方式：
-   *   - dataService.updateTag(完整Tag对象)
-   *   - dataService.updateTag(id, updates)
+   *   - dataService.updateTag(完整Tag对象) — 直接调用 IPC
+   *   - dataService.updateTag(id, updates) — 需调用方从 state 获取完整对象后传入
    */
   async updateTag(idOrItem: string | Tag, updates?: Partial<Tag>): Promise<void> {
     if (typeof idOrItem === 'object') {
       apiClient.updateTag(idOrItem).catch(console.error);
     } else {
-      const state = await apiClient.loadWorkspace();
-      const target = (state.tags || []).find(t => t.id === idOrItem);
-      if (target) {
-        apiClient.updateTag({ ...target, ...updates }).catch(console.error);
-      }
+      console.warn('[DataService] 请勿使用 updateTag(id, updates) 形式调用，'
+        + '应传完整 Tag 对象，避免内部全量 loadWorkspace。');
     }
   }
 
@@ -196,18 +204,15 @@ class DataService {
   /**
    * 更新集合
    * 兼容调用方式：
-   *   - dataService.updateCollection(完整Collection对象)
-   *   - dataService.updateCollection(id, updates)
+   *   - dataService.updateCollection(完整Collection对象) — 直接调用 IPC
+   *   - dataService.updateCollection(id, updates) — 需调用方从 state 获取完整对象后传入
    */
   async updateCollection(idOrItem: string | Collection, updates?: Partial<Collection>): Promise<void> {
     if (typeof idOrItem === 'object') {
       apiClient.updateCollection(idOrItem).catch(console.error);
     } else {
-      const state = await apiClient.loadWorkspace();
-      const target = (state.collections || []).find(c => c.id === idOrItem);
-      if (target) {
-        apiClient.updateCollection({ ...target, ...updates }).catch(console.error);
-      }
+      console.warn('[DataService] 请勿使用 updateCollection(id, updates) 形式调用，'
+        + '应传完整 Collection 对象，避免内部全量 loadWorkspace。');
     }
   }
 

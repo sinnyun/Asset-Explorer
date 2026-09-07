@@ -451,43 +451,53 @@ pub struct ValidationResult {
 }
 
 #[tauri::command]
-pub fn validate_assets(db: State<'_, Database>) -> Result<ValidationResult, String> {
-    let (total, deleted) = db.validate_assets()?;
-    Ok(ValidationResult {
-        deleted_count: deleted,
-        total_checked: total,
+pub async fn validate_assets(db: State<'_, Database>) -> Result<ValidationResult, String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let (total, deleted) = db.validate_assets()?;
+        Ok(ValidationResult {
+            deleted_count: deleted,
+            total_checked: total,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 指令 25: 读取缩略图文件并以 base64 data URL 返回（绕过浏览器 file:// 安全限制）
 /// 使用 mime_guess 开源库替代手写 MIME 推断
 #[tauri::command]
-pub fn read_thumbnail_base64(file_path: String) -> Result<String, String> {
-    let path = std::path::Path::new(&file_path);
-    if !path.exists() {
-        return Err(format!("缩略图文件不存在: {}", file_path));
-    }
-    let bytes = std::fs::read(path).map_err(|e| format!("读取缩略图失败: {}", e))?;
-    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+pub async fn read_thumbnail_base64(file_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = std::path::Path::new(&file_path);
+        if !path.exists() {
+            return Err(format!("缩略图文件不存在: {}", file_path));
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("读取缩略图失败: {}", e))?;
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
 
-    // 使用 mime_guess 根据扩展名推断 MIME 类型
-    let mime = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .and_then(|ext| mime_guess::from_ext(ext).first())
-        .map(|m| m.essence_str().to_string())
-        .unwrap_or_else(|| "image/png".to_string());
+        // 使用 mime_guess 根据扩展名推断 MIME 类型
+        let mime = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|ext| mime_guess::from_ext(ext).first())
+            .map(|m| m.essence_str().to_string())
+            .unwrap_or_else(|| "image/png".to_string());
 
-    Ok(format!("data:{};base64,{}", mime, b64))
+        Ok(format!("data:{};base64,{}", mime, b64))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 指令 26: 读取任意文件并以 base64 data URL 返回（用于文件预览）
 /// 与 read_thumbnail_base64 类似，但面向源文件而非缩略图缓存。
-/// 设定了 200MB 大小上限，超出部分建议直接使用 asset:// URL 方式加载。
+/// 设定了 50MB 大小上限（原为 200MB，过高会占用 ~270MB 内存且造成严重 GC 压力），
+/// 超出部分由前端回退到缩略图或 asset:// URL 方式加载。
 /// 使用 tokio::task::spawn_blocking 避免大文件读取阻塞 Tauri 主线程。
 #[tauri::command]
 pub async fn read_file_base64(file_path: String) -> Result<String, String> {
-    const MAX_PREVIEW_BYTES: u64 = 200 * 1024 * 1024; // 200MB
+    const MAX_PREVIEW_BYTES: u64 = 50 * 1024 * 1024; // 50MB（过高会占用 ~270MB 内存，且造成大量 GC 压力）
 
     let path_clone = file_path.clone();
     tokio::task::spawn_blocking(move || {

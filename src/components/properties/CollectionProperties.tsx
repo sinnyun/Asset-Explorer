@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Layers, Pin, PinOff, ArrowUp, ArrowDown, Trash2, 
   HardDrive, Calendar, Check, Image as ImageIcon, Folder, Sparkles 
@@ -42,9 +42,20 @@ export function CollectionProperties({
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   // Filter assets and folders in this collection
-  const collectedAssets = assets.filter(a => a.collections.includes(collection.id));
-  const collectedFolders = folders.filter(f => f.collections.includes(collection.id));
-  const totalSizeBytes = collectedAssets.reduce((sum, a) => sum + a.size, 0);
+  // useMemo 优化计算
+  const collectedAssets = useMemo(
+    () => assets.filter(a => a.collections.includes(collection.id)),
+    [assets, collection.id]
+  );
+  const collectedFolders = useMemo(
+    () => folders.filter(f => f.collections.includes(collection.id)),
+    [folders, collection.id]
+  );
+  const totalSizeBytes = useMemo(() => {
+    let sum = 0;
+    for (const a of collectedAssets) sum += a.size;
+    return sum;
+  }, [collectedAssets]);
 
   const currentIndex = allCollections.findIndex(c => c.id === collection.id);
   const canMoveUp = currentIndex > 0;

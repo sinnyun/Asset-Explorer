@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Filter, Pin, PinOff, ArrowUp, ArrowDown, Trash2, Plus, Trash, 
   LayoutGrid, Clock, Tag as TagIcon, Image as ImageIcon, Box, 
@@ -48,29 +48,60 @@ export function SmartFolderProperties({
 }: SmartFolderPropertiesProps) {
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
-  // Compute matched assets
-  const matchedAssets = assets.filter(asset => {
-    if (smartFolder.filter) return smartFolder.filter(asset);
-    if (!smartFolder.rules || smartFolder.rules.length === 0) return true;
+  // Compute matched assets with useMemo（避免每次渲染都全量 filter + reduce）
+  // 保留原始子串匹配语义：tag.name.includes(rule.value)
+  const matchedAssets = useMemo(() => {
+    const rules = smartFolder.rules;
+    if (!rules || rules.length === 0) {
+      if (smartFolder.filter) {
+        return assets.filter(smartFolder.filter);
+      }
+      return assets; // 无规则 → 全部匹配
+    }
 
-    const matches = smartFolder.rules.map(rule => {
-      if (rule.type === 'name') return asset.name.toLowerCase().includes(rule.value.toLowerCase());
+    // 预计算每条规则的 tag/collection 子串匹配 ID 集
+    const precomputed = rules.map(rule => {
       if (rule.type === 'tag') {
-        const foundTag = tags.find(t => t.name.toLowerCase().includes(rule.value.toLowerCase()));
-        return foundTag ? asset.tags.includes(foundTag.id) : false;
+        const valLower = rule.value.toLowerCase();
+        const ids = new Set<string>();
+        for (const t of tags) {
+          if (t.name.toLowerCase().includes(valLower)) ids.add(t.id);
+        }
+        return { rule, tagIds: ids, colIds: new Set<string>() };
       }
       if (rule.type === 'collection') {
-        const foundCol = collections.find(c => c.name.toLowerCase().includes(rule.value.toLowerCase()));
-        return foundCol ? asset.collections.includes(foundCol.id) : false;
+        const valLower = rule.value.toLowerCase();
+        const ids = new Set<string>();
+        for (const c of collections) {
+          if (c.name.toLowerCase().includes(valLower)) ids.add(c.id);
+        }
+        return { rule, tagIds: new Set<string>(), colIds: ids };
       }
-      if (rule.type === 'type') return asset.type.toLowerCase() === rule.value.toLowerCase();
-      return false;
+      return { rule, tagIds: new Set<string>(), colIds: new Set<string>() };
     });
 
-    return smartFolder.matchAll ? matches.every(Boolean) : matches.some(Boolean);
-  });
+    const result: Asset[] = [];
+    for (const asset of assets) {
+      const matches = precomputed.map(p => {
+        const { rule } = p;
+        if (rule.type === 'name') return asset.name.toLowerCase().includes(rule.value.toLowerCase());
+        if (rule.type === 'tag') return asset.tags.some(tid => p.tagIds.has(tid));
+        if (rule.type === 'collection') return asset.collections.some(cid => p.colIds.has(cid));
+        if (rule.type === 'type') return asset.type.toLowerCase() === rule.value.toLowerCase();
+        return false;
+      });
+      if (smartFolder.matchAll ? matches.every(Boolean) : matches.some(Boolean)) {
+        result.push(asset);
+      }
+    }
+    return result;
+  }, [assets, tags, collections, smartFolder]);
 
-  const totalSizeBytes = matchedAssets.reduce((sum, a) => sum + a.size, 0);
+  const totalSizeBytes = useMemo(() => {
+    let sum = 0;
+    for (const a of matchedAssets) sum += a.size;
+    return sum;
+  }, [matchedAssets]);
   const currentIndex = allSmartFolders.findIndex(sf => sf.id === smartFolder.id);
   const canMoveUp = currentIndex > 0;
   const canMoveDown = currentIndex >= 0 && currentIndex < allSmartFolders.length - 1;

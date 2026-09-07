@@ -44,23 +44,25 @@ fn main() {
         // 机制 2：启动时自动校验资产有效性并挂载文件监听器
         // ====================================================================
         .setup(move |app| {
-            println!("[Startup] Tauri 应用启动中，开始初始化校验与监控...");
-            // 启动时自动校验：删除数据库中文件已不存在的资产记录
-            // 此校验作用于已持久化的所有资产路径，包括因之前开发/测试扫描
-            // 而写入数据库的 C:/Workspace 等模拟数据路径。
-            // 校验结果会通过 IPC 返回给前端，在浏览器控制台可见。
-            match db_for_setup.validate_assets() {
-                Ok((total, deleted)) => {
-                    println!("[Startup] 启动资产校验完成: 检查 {} 个资产, 清理了 {} 个无效路径", total, deleted);
-                }
-                Err(e) => {
-                    eprintln!("[Startup] 启动资产校验失败: {}", e);
-                }
-            }
-
+            println!("[Startup] Tauri 应用启动中，开始初始化监控...");
             // 启动文件监控器，监听已监控文件夹的变更
             let app_handle = app.handle().clone();
             watcher::start_file_watcher(app_handle, Arc::new(db_for_setup.clone()));
+
+            // 资产有效性校验移至后台线程异步执行，不阻塞 Tauri 主线程与首帧渲染
+            // 前端 useAppState 不再调用 validate_assets + 二次 loadWorkspace，
+            // 避免每次启动都做全量数据拉取两次。
+            let validate_db = db_for_setup.clone();
+            std::thread::spawn(move || {
+                match validate_db.validate_assets() {
+                    Ok((total, deleted)) => {
+                        println!("[Startup] 启动资产校验完成: 检查 {} 个资产, 清理了 {} 个无效路径", total, deleted);
+                    }
+                    Err(e) => {
+                        eprintln!("[Startup] 启动资产校验失败: {}", e);
+                    }
+                }
+            });
             println!("[Startup] Tauri 初始化完成，开始监听窗口事件...");
             Ok(())
         })
