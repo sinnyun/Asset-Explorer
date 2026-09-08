@@ -381,8 +381,11 @@ pub async fn get_thumbnail(db: State<'_, Database>, asset_id: String, path: Stri
         let data_dir = db.get_data_dir().to_path_buf();
         let thumb_path = generate_or_get_thumbnail(p, max_dimension, &data_dir)?;
         let thumb_str = thumb_path.to_string_lossy().to_string();
-        // 将缩略图路径持久化到数据库，下次直接从 asset.thumbnailUrl 读取
-        db.update_asset_thumbnail_url(&asset_id, &thumb_str)?;
+        // 将缩略图路径持久化到数据库。
+        // DB 可能损坏/只读时仅记录错误，不因持久化失败阻塞缩略图返回。
+        if let Err(e) = db.update_asset_thumbnail_url(&asset_id, &thumb_str) {
+            eprintln!("[Thumbnail] 持久化缩略图路径到数据库失败(非致命): {}", e);
+        }
         Ok(thumb_str)
     })
     .await

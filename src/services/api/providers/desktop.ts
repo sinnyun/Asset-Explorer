@@ -190,10 +190,15 @@ class DesktopApiProvider implements ApiProvider {
 
     // ================================================================
     // 兜底：get_thumbnail 失败（如源文件已被移动/删除），
-    // 但 existingThumbnailUrl 可能仍指向独立有效的缩略图缓存，
-    // 尝试使用 convertFileSrc 尽力展示已有缩略图。
+    // 但 existingThumbnailUrl 可能仍指向独立有效的缩略图缓存。
+    // 此时优先通过 read_thumbnail_base64 直接读取文件返回 data URL，
+    // 相比 convertFileSrc 能绕过 asset:// 协议可能出现的 404 问题。
     // ================================================================
     if (existingThumbnailUrl) {
+      // 直接读取为 base64 data URL（绕过 asset:// 协议，最可靠的展示方式）
+      const dataUrl = await callRust<string>('read_thumbnail_base64', { filePath: existingThumbnailUrl });
+      if (dataUrl) return dataUrl;
+      // base64 也失败 → 退回 convertFileSrc 尽力尝试
       try {
         const { convertFileSrc } = await import('@tauri-apps/api/core');
         const assetUrl = convertFileSrc(existingThumbnailUrl);

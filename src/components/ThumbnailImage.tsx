@@ -153,8 +153,10 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
 
   /**
    * 处理 <img> 加载失败事件：
-   * - 桌面模式下，若 asset:// URL 因缓存文件失效导致 404，
+   * - 桌面模式下，若 asset:// URL 因缓存文件失效/路径格式问题导致 404，
    *   自动通过 Rust IPC 重新生成缩略图（只重试一次）。
+   * - 若重新生成后的 URL 仍然 404，则降级尝试 read_thumbnail_base64
+   *   直接读取文件为 data URL（绕过 asset:// 协议兼容性问题）。
    * - Web 模式下 URL 由服务端管理，直接显示占位图标。
    */
   const handleImageError = useCallback(() => {
@@ -170,9 +172,41 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
       setThumbUrl(null);
       loadThumbnail(true);
     } else {
-      setLoadingState('failed');
+      // 已重试过一次仍 404 → 尝试用 base64 data URL 展示已有缩略图
+      // （绕过 asset:// 协议对某些路径/盘的兼容性问题）
+      const base64CacheKey = `${cacheKey}:base64`;
+      let requestPromise = inFlightThumbnails.get(base64CacheKey);
+      if (!requestPromise) {
+        if (asset.thumbnailUrl) {
+          requestPromise = dataService.loadThumbnailBase64(asset.thumbnailUrl).finally(() => {
+            inFlightThumbnails.delete(base64CacheKey);
+          });
+        } else {
+          setLoadingState('failed');
+          return;
+        }
+        inFlightThumbnails.set(base64CacheKey, requestPromise);
+      }
+
+      setLoadingState('loading');
+      requestPromise
+        .then((dataUrl) => {
+          if (!mountedRef.current) return;
+          if (dataUrl) {
+            thumbnailCache.set(cacheKey, dataUrl);
+            setThumbUrl(dataUrl);
+            setLoadingState('done');
+          } else {
+            setLoadingState('failed');
+          }
+        })
+        .catch(() => {
+          if (mountedRef.current) {
+            setLoadingState('failed');
+          }
+        });
     }
-  }, [cacheKey, isDesktop, loadThumbnail]);
+  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop, loadThumbnail]);
 
   // 缩略图加载完成 → 显示图片
   if (thumbUrl && loadingState !== 'failed') {

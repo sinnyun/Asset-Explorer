@@ -58,6 +58,24 @@ class DataService {
     return await apiClient.getAssetThumbnail(assetId, path, existingThumbnailUrl);
   }
 
+  /**
+   * 直接从磁盘读取缩略图文件并返回 base64 data URL。
+   * 用于绕过 asset:// 协议可能出现的 404 兼容性问题。
+   * Web 模式下无本地文件系统访问能力，直接返回 null。
+   */
+  async loadThumbnailBase64(filePath: string): Promise<string | null> {
+    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return await invoke<string>('read_thumbnail_base64', { filePath });
+      } catch (err) {
+        console.warn(`[DataService] read_thumbnail_base64 调用失败:`, err);
+        return null;
+      }
+    }
+    return null;
+  }
+
   /** 校验资产有效性 */
   async validateAssets(): Promise<void> {
     await apiClient.validateAssets();
