@@ -36,6 +36,17 @@ export function MonitoredSplitView({
   const [col1ActiveFolderId, setCol1ActiveFolderId] = useState<string | null>(null);
   const [col2ActiveFolderId, setCol2ActiveFolderId] = useState<string | null>(null);
 
+  // 防御性去重：增量扫描与文件监视事件并发时 state 中可能出现同一 asset 多次。
+  // 在入口处统一按 asset.id 去重，防止下游分列列表渲染 key 冲突。
+  const dedupedAssets = useMemo(() => {
+    const seen = new Set<string>();
+    return assets.filter(a => {
+      if (!a?.id || seen.has(a.id)) return false;
+      seen.add(a.id);
+      return true;
+    });
+  }, [assets]);
+
   // 1. 提取所有被标记为监视的文件夹
   const monitoredRoots = useMemo(() => {
     return folders.filter(f => f.isMonitored);
@@ -108,22 +119,22 @@ export function MonitoredSplitView({
   // 分列 1 资产 (根据搜索与选中子文件夹过滤)
   const col1Assets = useMemo(() => {
     const targetFolderIds = col1ActiveFolderId ? [col1ActiveFolderId] : col1FolderIds;
-    return assets.filter(a => {
+    return dedupedAssets.filter(a => {
       const matchFolder = targetFolderIds.includes(a.folderId);
       const matchSearch = col1Search ? a.name.toLowerCase().includes(col1Search.toLowerCase()) : true;
       return matchFolder && matchSearch;
     });
-  }, [assets, col1FolderIds, col1ActiveFolderId, col1Search]);
+  }, [dedupedAssets, col1FolderIds, col1ActiveFolderId, col1Search]);
 
   // 分列 2 资产 (根据搜索与选中子文件夹过滤)
   const col2Assets = useMemo(() => {
     const targetFolderIds = col2ActiveFolderId ? [col2ActiveFolderId] : col2FolderIds;
-    return assets.filter(a => {
+    return dedupedAssets.filter(a => {
       const matchFolder = targetFolderIds.includes(a.folderId);
       const matchSearch = col2Search ? a.name.toLowerCase().includes(col2Search.toLowerCase()) : true;
       return matchFolder && matchSearch;
     });
-  }, [assets, col2FolderIds, col2ActiveFolderId, col2Search]);
+  }, [dedupedAssets, col2FolderIds, col2ActiveFolderId, col2Search]);
 
   const toggleCol1Expand = (id: string) => {
     setCol1Expanded(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
