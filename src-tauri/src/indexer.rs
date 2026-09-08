@@ -93,7 +93,7 @@ pub fn stable_hash(input: &str) -> String {
     hex::encode(&result[..8])
 }
 
-/// 是否是需要计算 SHA-256 和提取尺寸的媒体格式（图片直接提取尺寸，视频可留待后续）
+/// 是否是需要提取尺寸的媒体格式（图片直接读取文件头提取尺寸，视频可留待后续）
 fn should_extract_deep_metadata(asset_type: &str) -> bool {
     matches!(asset_type, "image")
 }
@@ -140,25 +140,15 @@ fn build_asset(
     let id = format!("ast_{}", stable_hash(&file_str));
 
     // ==================================================================
-    // 元数据提取链路：接入 extract_metadata，计算图片尺寸与必要哈希
-    // 关键性能优化：初次扫描时仅对 <= 2MB 的小文件同步计算 SHA-256。
-    // 大文件（如十几MB的照片或视频）避免全量流式读取，杜绝磁盘 I/O 堵塞
+    // 元数据提取链路：仅对图片读取文件头提取尺寸（不解码全图、不读文件内容）
+    // 设计原则：本应用定位为"资源管理器式查看器"，运行时不吞吐原始文件内容；
+    // 增量对账依赖文件系统自带的 mtime/size 签名，无需内容级 SHA-256。
     // ==================================================================
-    let (width, height, file_hash) = if should_extract_deep_metadata(&asset_type) {
+    let (width, height) = if should_extract_deep_metadata(&asset_type) {
         let meta = metadata_extractor::extract_metadata(file_path);
-        let hash = if file_size <= 2 * 1024 * 1024 {
-            metadata_extractor::compute_sha256(file_path).ok()
-        } else {
-            None // 大媒体文件跳过全量哈希计算，秒级完成初次入库
-        };
-        (meta.width, meta.height, hash)
+        (meta.width, meta.height)
     } else {
-        let hash = if file_size <= 1024 * 1024 {
-            metadata_extractor::compute_sha256(file_path).ok()
-        } else {
-            None
-        };
-        (None, None, hash)
+        (None, None)
     };
 
     Some(Asset {
@@ -177,7 +167,7 @@ fn build_asset(
         color: None,
         width,
         height,
-        file_hash,
+        file_hash: None, // 运行时不读取文件内容计算哈希（查看器定位，详阅模块注释）
         thumbnail_url: None,
     })
 }

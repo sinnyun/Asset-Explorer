@@ -481,7 +481,7 @@ pub async fn filter_by_smart_folder(assets: Vec<Asset>, smart_folder: SmartFolde
         .map_err(|e| e.to_string())
 }
 
-/// 指令 17: 提取文件元数据
+/// 指令 17: 提取文件元数据（仅文件头级：MIME 与图片尺寸，不读文件内容）
 #[tauri::command]
 pub async fn get_file_metadata(path: String) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || {
@@ -494,7 +494,6 @@ pub async fn get_file_metadata(path: String) -> Result<serde_json::Value, String
             "mimeType": meta.mime_type,
             "width": meta.width,
             "height": meta.height,
-            "sha256": meta.sha256,
         }))
     })
     .await

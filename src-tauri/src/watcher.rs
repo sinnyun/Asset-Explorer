@@ -492,8 +492,8 @@ fn handle_file_additions(
 }
 
 /// 处理单个文件修改（快速通道）：
-/// 除 mtime/size 外，联动重读图片宽高与文件哈希（阈值与 sync.rs 对账口径一致），
-/// 保证前端详情面板展示的尺寸/哈希随内容变化保持准确。
+/// 除 mtime/size 外，联动重读图片宽高（仅读文件头），保证前端详情面板
+/// 展示的尺寸随内容变化保持准确。不读取文件内容计算哈希。
 fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> Result<(), String> {
     if !path.exists() || !path.is_file() {
         return Ok(());
@@ -512,20 +512,14 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
             })
             .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-        // 内容级联动重读：图片重新提取宽高；小文件重算 SHA-256
-        // （大文件跳过全量哈希避免整盘读 IO，保留旧值）
+        // 内容级联动重读：图片重新提取宽高（仅读文件头，不解码不读内容）。
+        // 本应用为"资源管理器式查看器"，运行时不吞吐原始文件内容：
+        // 签名增量对账依赖文件系统自带的 mtime/size，无需内容级 SHA-256。
         let (new_width, new_height) = if existing.asset_type == "image" {
             let meta = metadata_extractor::extract_metadata(path);
             (meta.width, meta.height)
         } else {
             (existing.width, existing.height)
-        };
-        let new_hash = if new_size <= hash_threshold_for(&existing.asset_type) {
-            metadata_extractor::compute_sha256(path)
-                .ok()
-                .or_else(|| existing.file_hash.clone())
-        } else {
-            existing.file_hash.clone()
         };
 
         db.update_asset_signature(
@@ -534,7 +528,7 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
             new_size,
             new_width,
             new_height,
-            new_hash.as_deref(),
+            existing.file_hash.as_deref(),
         )?;
 
         let updated_asset = Asset {
@@ -542,7 +536,6 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
             date_modified: new_date.clone(),
             width: new_width,
             height: new_height,
-            file_hash: new_hash,
             ..existing.clone()
         };
 
@@ -555,15 +548,6 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
         println!("[Watcher] 文件已更新: {}", path_str);
     }
     Ok(())
-}
-
-/// 计算该类型允许全量重算哈希的最大体积（与 sync.rs 对账口径保持一致）。
-fn hash_threshold_for(asset_type: &str) -> u64 {
-    if asset_type == "image" {
-        2 * 1024 * 1024
-    } else {
-        1024 * 1024
-    }
 }
 
 /// 解析文件所属文件夹 id：优先查本批共享的目录缓存（避免逐文件全表查询），

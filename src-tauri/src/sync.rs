@@ -223,22 +223,13 @@ fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, r
     let now_str = Utc::now().to_rfc3339();
     let id = format!("ast_{}", stable_hash(&file_str));
 
-    // 仅对图片等需要深度元数据的类型计算尺寸，与 indexer 保持一致；为大文件跳过全量哈希。
-    let (width, height, file_hash) = if asset_type == "image" {
+    // 仅对图片读取文件头提取尺寸（不解码、不读内容，"资源管理器式查看器"定位：
+    // 运行时不吞吐原始文件内容，增量对账依赖文件系统自带的 mtime/size 签名）
+    let (width, height) = if asset_type == "image" {
         let meta = metadata_extractor::extract_metadata(path);
-        let hash = if file_size <= 2 * 1024 * 1024 {
-            metadata_extractor::compute_sha256(path).ok()
-        } else {
-            None
-        };
-        (meta.width, meta.height, hash)
+        (meta.width, meta.height)
     } else {
-        let hash = if file_size <= 1024 * 1024 {
-            metadata_extractor::compute_sha256(path).ok()
-        } else {
-            None
-        };
-        (None, None, hash)
+        (None, None)
     };
 
     Some(Asset {
@@ -257,7 +248,7 @@ fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, r
         color: None,
         width,
         height,
-        file_hash,
+        file_hash: None, // 不读取文件内容计算哈希
         thumbnail_url: None,
     })
 }
