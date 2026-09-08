@@ -246,7 +246,13 @@ export function MainArea({
     const groupsMap = new Map<string, { folder: Folder, assets: Asset[] }>();
     
     // Collect folders from assets
+    // 防御性去重：同一批次/状态中 asset.id 可能出现重复（增量扫描与文件监视事件并发时）
+    // 先按 asset.id 去重，保证同一资产在同一分组内只渲染一次，避免 React key 冲突
+    const seenAssetIds = new Set<string>();
     filteredAssets.forEach(a => {
+      if (!a?.id || seenAssetIds.has(a.id)) return; // 跳过重复
+      seenAssetIds.add(a.id);
+
       if (!groupsMap.has(a.folderId)) {
         const f = foldersById.get(a.folderId);
         if (f) groupsMap.set(f.id, { folder: f, assets: [] });

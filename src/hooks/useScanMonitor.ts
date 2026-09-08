@@ -81,9 +81,18 @@ export function useScanMonitor(
       pendingAssetsBufferRef.current = [];
       const normalized = normalizeAssets(buffer);
 
+      // 批次内部去重：同一批扫描 chunk 中可能出现重复资产（多事件源/重叠目录扫描）
+      // 仅对 prev.assets 去重不够——同一批次内的重复也会进入 toAdd 造成 React key 冲突
+      const seenInBatch = new Set<string>();
+      const deduped = normalized.filter(a => {
+        if (!a?.id || seenInBatch.has(a.id)) return false;
+        seenInBatch.add(a.id);
+        return true;
+      });
+
       setState((prev) => {
         const existing = new Set(prev.assets.map((a) => a.id));
-        const toAdd = normalized.filter((a) => !existing.has(a.id));
+        const toAdd = deduped.filter((a) => !existing.has(a.id));
         if (toAdd.length === 0) return prev;
         return { ...prev, assets: [...prev.assets, ...toAdd] };
       });
