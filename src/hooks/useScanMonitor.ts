@@ -81,17 +81,14 @@ export function useScanMonitor(
       pendingAssetsBufferRef.current = [];
       const normalized = normalizeAssets(buffer);
 
-      // Buffer 内部先去重：同一批次中若出现重复 id（可能来自多个 scan 并发推送或
-      // watcher 与扫描器对同一文件的重复上报），只保留最后一条，从根上杜绝
-      // state.assets 出现重复项导致 React 渲染 key 冲突。
-      const seenInBuffer = new Set<string>();
-      const deduped: typeof normalized = [];
-      for (const a of normalized) {
-        if (!seenInBuffer.has(a.id)) {
-          seenInBuffer.add(a.id);
-          deduped.push(a);
-        }
-      }
+      // 批次内部去重：同一批扫描 chunk 中可能出现重复资产（多事件源/重叠目录扫描）
+      // 仅对 prev.assets 去重不够——同一批次内的重复也会进入 toAdd 造成 React key 冲突
+      const seenInBatch = new Set<string>();
+      const deduped = normalized.filter(a => {
+        if (!a?.id || seenInBatch.has(a.id)) return false;
+        seenInBatch.add(a.id);
+        return true;
+      });
 
       setState((prev) => {
         const existing = new Set(prev.assets.map((a) => a.id));

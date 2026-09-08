@@ -119,7 +119,15 @@ export function useAssetFiltering(
         result = result.filter(a => (a.name || '').toLowerCase().includes(queryLower));
       }
     }
-    return result;
+
+    // 防御性去重：增量扫描 + 文件监视事件并发时可能出现同一 asset 出现在 state 中多次，
+    // 导致 React 列表渲染 key 冲突。此处统一去重，保证下游组件（MainArea / MonitoredSplitView）拿到干净数据。
+    const seen = new Set<string>();
+    return result.filter(a => {
+      if (!a?.id || seen.has(a.id)) return false;
+      seen.add(a.id);
+      return true;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.assets, state.activeFolderId, state.activeSmartFolderId, state.activeTagId, state.activeCollectionId, deferredSearchQuery, state.folders, state.includeSubfolders, state.customSmartFolders, state.tags, state.collections, smartFolders]);
 

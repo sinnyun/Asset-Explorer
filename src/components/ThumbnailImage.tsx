@@ -102,8 +102,14 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
       .then((url) => {
         if (!mountedRef.current) return;
         if (url) {
-          // 缩略图加载成功 → 清除重试标记，允许后续失败再次自动恢复
-          regenerationAttempted.delete(cacheKey);
+          // 缩略图加载成功 → 清除重试标记，允许后续失败再次自动恢复。
+          // 但若返回的是 asset 协议 URL（asset:// / asset.localhost），
+          // 协议可能本身不可用——保留 regenerationAttempted 标记，
+          // 使后续 onError 能直接走 base64 降级而不是陷入无效重试循环。
+          const isAssetProtoUrl = url.startsWith('asset://') || url.includes('asset.localhost');
+          if (!isAssetProtoUrl) {
+            regenerationAttempted.delete(cacheKey);
+          }
           thumbnailCache.set(cacheKey, url);
           setThumbUrl(url);
           setLoadingState('done');
@@ -158,16 +164,72 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
    * - 若重新生成后的 URL 仍然 404，则降级尝试 read_thumbnail_base64
    *   直接读取文件为 data URL（绕过 asset:// 协议兼容性问题）。
    * - Web 模式下 URL 由服务端管理，直接显示占位图标。
+   *
+   * 【增强】asset:// / asset.localhost 协议出现 ERR_CONNECTION_REFUSED
+   *   （Tauri asset 协议整体未就绪）时，重新生成只会再产生同类型的 asset 协议 URL，
+   *   无法解决问题。此时优先尝试直接 base64 读取，绕过 asset 协议。
    */
   const handleImageError = useCallback(() => {
     if (!isDesktop) {
       setLoadingState('failed');
       return;
     }
-    // 每个资产只自动重新生成一次，防止 onError 无限循环
+    // 判断当前失败 URL 是否为 asset 协议（Tauri v1: asset://, v2: http://asset.localhost/）
+    const isAssetProtocolUrl = (thumbUrl?.startsWith('asset://')
+      || (thumbUrl ?? '').includes('asset.localhost'));
+
+    // asset:// 协议连接被拒绝（非 404 文件缺失而是协议本身不可用）→ 直接跳级到 base64 降级
+    if (isAssetProtocolUrl) {
+      // 若已经重试过重新生成且仍失败 → 不再重试，直接 base64
+      if (regenerationAttempted.has(cacheKey)) {
+        // 清理缓存并尝试 base64 读取
+        thumbnailCache.delete(cacheKey);
+        const base64CacheKey = `${cacheKey}:base64`;
+        let requestPromise = inFlightThumbnails.get(base64CacheKey);
+        if (!requestPromise) {
+          if (asset.thumbnailUrl) {
+            requestPromise = dataService.loadThumbnailBase64(asset.thumbnailUrl).finally(() => {
+              inFlightThumbnails.delete(base64CacheKey);
+            });
+          } else {
+            // thumbnailUrl 缺失 → 尝试通过 IPC 获取新缩略图路径再读 base64
+            setLoadingState('failed');
+            return;
+          }
+          inFlightThumbnails.set(base64CacheKey, requestPromise);
+        }
+
+        setLoadingState('loading');
+        requestPromise
+          .then((dataUrl) => {
+            if (!mountedRef.current) return;
+            if (dataUrl) {
+              thumbnailCache.set(cacheKey, dataUrl);
+              setThumbUrl(dataUrl);
+              setLoadingState('done');
+            } else {
+              setLoadingState('failed');
+            }
+          })
+          .catch(() => {
+            if (mountedRef.current) {
+              setLoadingState('failed');
+            }
+          });
+        return;
+      }
+
+      // 首次失败 → 标记已重试，先尝试 IPC 重新生成（可能返回 base64 data URL）
+      regenerationAttempted.add(cacheKey);
+      thumbnailCache.delete(cacheKey);
+      setThumbUrl(null);
+      loadThumbnail(true);
+      return;
+    }
+
+    // 非 asset 协议 URL 的普通加载失败（如 http 404）→ 每个资产只自动重新生成一次
     if (!regenerationAttempted.has(cacheKey)) {
       regenerationAttempted.add(cacheKey);
-      // 清除缓存与旧的 URL，强制走重新生成流程
       thumbnailCache.delete(cacheKey);
       setThumbUrl(null);
       loadThumbnail(true);
@@ -206,7 +268,7 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
           }
         });
     }
-  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop, loadThumbnail]);
+  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop, loadThumbnail, thumbUrl]);
 
   // 缩略图加载完成 → 显示图片
   if (thumbUrl && loadingState !== 'failed') {
