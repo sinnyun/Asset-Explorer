@@ -7,6 +7,7 @@ mod database;
 mod indexer;
 mod metadata_extractor;
 mod models;
+mod sync;
 mod thumbnail_cache;
 mod watcher;
 
@@ -69,6 +70,25 @@ fn main() {
                 }
             }
 
+            // 后台周期对账兜底：每 60s 以廉价剪枝模式对全部已监控根做一次对账，
+            // 纠正 notify 事件可能存在的漏检（结构变化必定冒泡到目录 mtime，能被剪枝路径捕获）。
+            let per_app = app_handle.clone();
+            let per_db = db_for_setup.clone();
+            std::thread::spawn(move || {
+                use crate::sync::{reconcile_root, ReconcileMode};
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    if let Ok(folders) = per_db.get_monitored_folders() {
+                        for f in &folders {
+                            let p = std::path::Path::new(&f.path);
+                            if p.exists() {
+                                let _ = reconcile_root(&per_app, &per_db, p, ReconcileMode::Pruned);
+                            }
+                        }
+                    }
+                }
+            });
+
             // 资产有效性校验移至后台线程异步执行，不阻塞 Tauri 主线程与首帧渲染
             // 前端 useAppState 不再调用 validate_assets + 二次 loadWorkspace，
             // 避免每次启动都做全量数据拉取两次。
@@ -97,6 +117,25 @@ fn main() {
                 db.checkpoint();
                 // 终止当前进程及其派生线程，避免僵尸进程遗留
                 std::process::exit(0);
+            }
+            // 窗口重新获得焦点时，做一次廉价剪枝对账兜底，确保用户回到应用后
+            // 界面与磁盘一致（覆盖来自外部资源管理器等在中途的目录增删改）。
+            if let tauri::WindowEvent::Focused(true) = event {
+                if _window.label() == "main" {
+                    let focus_app = _window.app_handle().clone();
+                    let focus_db = db.clone();
+                    std::thread::spawn(move || {
+                        use crate::sync::{reconcile_root, ReconcileMode};
+                        if let Ok(folders) = focus_db.get_monitored_folders() {
+                            for f in &folders {
+                                let p = std::path::Path::new(&f.path);
+                                if p.exists() {
+                                    let _ = reconcile_root(&focus_app, &focus_db, p, ReconcileMode::Pruned);
+                                }
+                            }
+                        }
+                    });
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -139,7 +178,8 @@ fn main() {
             validate_assets,
             read_thumbnail_base64,
             read_file_base64,
-            file_exists
+            file_exists,
+            reconcile_monitored_folders
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 桌面客户端失败");

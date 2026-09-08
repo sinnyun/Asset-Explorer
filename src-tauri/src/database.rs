@@ -67,6 +67,21 @@ pub struct Database {
 /// 批量关联映射：asset_id → Vec<name_or_id>
 type AssocMap = HashMap<String, Vec<String>>;
 
+/// 规范化根路径：去掉首尾空白与末尾分隔符，避免前缀误匹配。
+fn normalize_root(p: &str) -> String {
+    p.trim().trim_end_matches(['/', '\\']).to_string()
+}
+
+/// 判断文件路径是否位于某根目录（含根本身）之下。兼容 Windows/Linux 分隔符与大小写。
+fn is_path_under(path: &str, root: &str) -> bool {
+    let p = path.to_lowercase();
+    let r = root.to_lowercase();
+    if p == r {
+        return true;
+    }
+    p.starts_with(&format!("{}/", r)) || p.starts_with(&format!("{}\\", r))
+}
+
 impl Database {
     /// 初始化并连接本地 SQLite 数据库文件
     /// 自动从 app_config.json 读取自定义或默认存储路径
@@ -397,6 +412,14 @@ impl Database {
         }
         if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "is_pinned") {
             let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
+        }
+
+        // 5. folders 表迁移
+        //    新增 mtime 列：记录目录磁盘修改时间，供对账增量剪枝使用。
+        //    （内容级文件修改不会改变父目录 mtime，详阅 PLAN_realtime_reconcile.md）
+        let folder_cols = existing_columns("folders");
+        if !folder_cols.is_empty() && !folder_cols.iter().any(|c| c == "mtime") {
+            let _ = conn.execute_batch("ALTER TABLE folders ADD COLUMN mtime TEXT DEFAULT NULL;");
         }
 
         // 5. 创建 FTS5 全文搜索虚拟表（SQLite >= 3.41 bundled 自带 FTS5）
@@ -974,7 +997,7 @@ impl Database {
     pub fn get_folders(&self) -> Result<Vec<Folder>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, path, parent_id, is_monitored FROM folders ORDER BY name ASC")
+            .prepare("SELECT id, name, path, parent_id, is_monitored, mtime FROM folders ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let iter = stmt
@@ -986,6 +1009,7 @@ impl Database {
                     parent_id: row.get(3)?,
                     is_monitored: row.get::<_, i32>(4)? != 0,
                     asset_count: None,
+                    mtime: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1001,7 +1025,7 @@ impl Database {
     pub fn get_monitored_folders(&self) -> Result<Vec<Folder>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, path, parent_id, is_monitored FROM folders WHERE is_monitored = 1 ORDER BY name ASC")
+            .prepare("SELECT id, name, path, parent_id, is_monitored, mtime FROM folders WHERE is_monitored = 1 ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let iter = stmt
@@ -1013,6 +1037,7 @@ impl Database {
                     parent_id: row.get(3)?,
                     is_monitored: row.get::<_, i32>(4)? != 0,
                     asset_count: None,
+                    mtime: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1109,9 +1134,25 @@ impl Database {
 
     pub fn insert_folder(&self, folder: &Folder) -> Result<(), String> {
         let conn = self.conn.lock();
+        // 使用安全 UPSERT（ON CONFLICT DO UPDATE），避免 INSERT OR REPLACE 触发
+        // 级联删除子文件夹/资产。
         conn.execute(
-            "INSERT OR REPLACE INTO folders (id, name, path, parent_id, is_monitored) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![folder.id, folder.name, folder.path, folder.parent_id, folder.is_monitored as i32],
+            "INSERT INTO folders (id, name, path, parent_id, is_monitored, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                path = excluded.path,
+                parent_id = excluded.parent_id,
+                is_monitored = excluded.is_monitored,
+                mtime = excluded.mtime",
+            params![
+                folder.id,
+                folder.name,
+                folder.path,
+                folder.parent_id,
+                folder.is_monitored as i32,
+                folder.mtime
+            ],
         ).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -1147,6 +1188,117 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    // =========================================================================
+    // 实时对账（Reconcile）支持方法
+    // 磁盘为唯一真相源，数据库只是可丢弃缓存：对账时以磁盘目录/文件 mtime
+    // 为增量信号，只对发生变化的条目做深度重读（详阅 PLAN_realtime_reconcile.md）。
+    // =========================================================================
+
+    /// 以安全 UPSERT 方式写入/更新单个文件夹（含 mtime），供对账增量使用。
+    /// 使用 ON CONFLICT DO UPDATE，避免替换触发级联删除子文件夹/资产。
+    pub fn upsert_folder(&self, folder: &Folder) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO folders (id, name, path, parent_id, is_monitored, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                path = excluded.path,
+                parent_id = excluded.parent_id,
+                is_monitored = excluded.is_monitored,
+                mtime = excluded.mtime",
+            params![
+                folder.id,
+                folder.name,
+                folder.path,
+                folder.parent_id,
+                folder.is_monitored as i32,
+                folder.mtime
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 获取位于给定根目录（含本身及所有子孙目录）下的全部文件夹。
+    /// 路径比对同时兼容 Windows/Linux 分隔符与大小写。
+    pub fn get_folders_under(&self, root_path: &str) -> Result<Vec<Folder>, String> {
+        let root = normalize_root(root_path);
+        Ok(self
+            .get_folders()?
+            .into_iter()
+            .filter(|f| is_path_under(&f.path, &root))
+            .collect())
+    }
+
+    /// 轻量读取某根目录下全部资产的签名 (path, date_modified, size)，
+    /// 供对账与库内现状比对，避免携带 tags/collections 的额外开销。
+    pub fn get_asset_signatures_under(&self, root_path: &str) -> Result<Vec<(String, String, i64)>, String> {
+        let root = normalize_root(root_path);
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT path, date_modified, size FROM assets")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows.flatten() {
+            if is_path_under(&r.0, &root) {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 按文件夹物理路径删除该文件夹及其整棵子孙树（子文件夹与全部资产经外键级联）。
+    /// 返回值表示删除的文件夹行数。
+    pub fn delete_folder_tree_by_path(&self, path: &str) -> Result<usize, String> {
+        let conn = self.conn.lock();
+        // folders(parent_id)→folders 与 assets(folder_id)→folders 均为 ON DELETE CASCADE，
+        // 删除父文件夹行即可级联清理整棵子树。
+        let folder_id: Option<String> = conn
+            .query_row("SELECT id FROM folders WHERE path = ?1 LIMIT 1", params![path], |r| r.get(0))
+            .ok();
+        let mut affected = 0usize;
+        if let Some(fid) = folder_id {
+            affected = conn
+                .execute("DELETE FROM folders WHERE id = ?1", params![fid])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(affected)
+    }
+
+    /// 按物理路径前缀删除资产（如目录重命名/移除后清理旧路径下的孤儿资产）。
+    pub fn delete_assets_by_prefix(&self, prefix: &str) -> Result<usize, String> {
+        let root = normalize_root(prefix);
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT path FROM assets")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut doomed: Vec<String> = Vec::new();
+        for r in rows.flatten() {
+            if is_path_under(&r, &root) {
+                doomed.push(r);
+            }
+        }
+        drop(stmt);
+        let mut count = 0usize;
+        if !doomed.is_empty() {
+            count = self.delete_assets_by_paths(&doomed)?;
+        }
+        Ok(count)
     }
 
     pub fn get_tags(&self) -> Result<Vec<Tag>, String> {

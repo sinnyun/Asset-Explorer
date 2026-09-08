@@ -4,15 +4,46 @@
  */
 import type React from 'react';
 import { useEffect, useRef } from 'react';
-import type { Asset, AssetState } from '../types';
+import type { Asset, AssetState, Folder } from '../types';
 import { runtime } from '../services/api';
 
-/** 文件监控事件载荷类型定义 */
+/** 资产监控事件载荷类型定义 */
 interface FileMonitoringPayload {
   asset_id?: string;
   path?: string;
   asset?: Asset;
 }
+
+/** 文件夹监控事件载荷类型（对应后端 FolderChangeEvent，字段为 Rust Folder 序列化子集） */
+interface FolderMonitoringPayload {
+  folder?: {
+    id: string;
+    name: string;
+    path: string;
+    parentId?: string | null;
+    isMonitored?: boolean;
+  };
+  action?: string; // "added" | "updated" | "removed"
+}
+
+/** 将后端文件夹载荷映射为前端 Folder 状态（补齐 tags/collections 等前端默认字段） */
+const toFrontendFolder = (f: NonNullable<FolderMonitoringPayload['folder']>): Folder => ({
+  id: f.id,
+  name: f.name,
+  path: f.path,
+  isMonitored: f.isMonitored ?? false,
+  parentId: f.parentId ?? undefined,
+  tags: [],
+  collections: [],
+});
+
+/** 判断子路径是否位于某文件夹路径（含分隔符，避免前缀误匹配） */
+const isUnderFolder = (childPath: string, folderPath: string): boolean => {
+  if (childPath === folderPath) return true;
+  const c = childPath.toLowerCase();
+  const f = folderPath.toLowerCase();
+  return c.startsWith(`${f}/`) || c.startsWith(`${f}\\`);
+};
 
 /**
  * 桌面模式：监听文件监控器实时事件（资产新增/删除/修改）
@@ -183,7 +214,48 @@ export function useFileMonitoring(
           }
         });
 
-        unlisteners = [unlistenAdd, unlistenRemove, unlistenModify];
+        // 文件夹新增：目录树实时上屏（按 id 去重，避免重复渲染）
+        const unlistenFolderAdd = await listen<FolderMonitoringPayload>('folder:added', (ev) => {
+          const folder = ev.payload?.folder;
+          console.log('[Monitor][前端] 收到 folder:added:', folder?.path ?? '(空)');
+          if (!folder?.id) return;
+          setState(prev => {
+            if (prev.folders.some(f => f.id === folder.id)) return prev;
+            return { ...prev, folders: [...prev.folders, toFrontendFolder(folder)] };
+          });
+        });
+
+        // 文件夹更新：按 id 原位替换
+        const unlistenFolderUpdate = await listen<FolderMonitoringPayload>('folder:updated', (ev) => {
+          const folder = ev.payload?.folder;
+          console.log('[Monitor][前端] 收到 folder:updated:', folder?.path ?? '(空)');
+          if (!folder?.id) return;
+          setState(prev => ({
+            ...prev,
+            folders: prev.folders.map(f => (f.id === folder.id ? toFrontendFolder(folder) : f)),
+          }));
+        });
+
+        // 文件夹删除：移除该文件夹及其整棵子孙树（按路径前缀，后端为级联删除）
+        const unlistenFolderRemove = await listen<FolderMonitoringPayload>('folder:removed', (ev) => {
+          const folder = ev.payload?.folder;
+          console.log('[Monitor][前端] 收到 folder:removed:', folder?.path ?? '(空)');
+          if (!folder?.id) return;
+          const path = folder.path;
+          setState(prev => ({
+            ...prev,
+            folders: prev.folders.filter(f => f.id !== folder.id && !isUnderFolder(f.path, path)),
+          }));
+        });
+
+        unlisteners = [
+          unlistenAdd,
+          unlistenRemove,
+          unlistenModify,
+          unlistenFolderAdd,
+          unlistenFolderUpdate,
+          unlistenFolderRemove,
+        ];
       } catch (e) {
         console.warn('[App] 文件监控事件监听器初始化失败（非桌面环境可忽略）:', e);
       }

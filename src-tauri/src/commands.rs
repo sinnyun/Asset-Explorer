@@ -668,3 +668,39 @@ pub async fn read_file_base64(file_path: String) -> Result<String, String> {
 pub fn file_exists(file_path: String) -> bool {
     std::path::Path::new(&file_path).exists()
 }
+
+/// 指令 28: 对全部已监控根文件夹执行一次廉价剪枝对账
+/// 以磁盘为真相源，用目录/文件 mtime 做增量，纠正 notify 事件漏检；
+/// 幂等，可安全重复调用。返回聚合后的对账报告供前端/日志查看。
+#[tauri::command]
+pub async fn reconcile_monitored_folders(
+    db: State<'_, Database>,
+    app_handle: tauri::AppHandle,
+) -> Result<crate::sync::ReconcileReport, String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        use crate::sync::{reconcile_root, ReconcileMode};
+        let folders = db.get_monitored_folders()?;
+        let mut total = crate::sync::ReconcileReport::default();
+        for f in &folders {
+            let p = Path::new(&f.path);
+            if !p.exists() || !p.is_dir() {
+                continue;
+            }
+            match reconcile_root(&app_handle, &db, p, ReconcileMode::Pruned) {
+                Ok(r) => {
+                    total.folders_added += r.folders_added;
+                    total.folders_removed += r.folders_removed;
+                    total.folders_updated += r.folders_updated;
+                    total.assets_added += r.assets_added;
+                    total.assets_removed += r.assets_removed;
+                    total.assets_updated += r.assets_updated;
+                }
+                Err(e) => eprintln!("[Cmd] reconcile_monitored_folders 对账失败 {}: {}", f.path, e),
+            }
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

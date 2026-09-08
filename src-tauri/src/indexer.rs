@@ -211,6 +211,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
         parent_id: None,
         is_monitored: true,
         asset_count: None,
+        mtime: None,
     };
 
     // 1. 使用 ignore crate 的 WalkBuilder 遍历目录
@@ -275,6 +276,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
             parent_id,
             is_monitored: false,
             asset_count: None,
+            mtime: None,
         });
     }
 
@@ -343,6 +345,7 @@ pub fn scan_local_directory_incremental(
         parent_id: None,
         is_monitored: true,
         asset_count: None,
+        mtime: None,
     };
 
     // ---- 阶段 1：遍历收集目录与文件清单 ----
@@ -403,6 +406,7 @@ pub fn scan_local_directory_incremental(
             parent_id,
             is_monitored: false,
             asset_count: None,
+            mtime: None,
         });
     }
 

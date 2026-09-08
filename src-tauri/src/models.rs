@@ -41,6 +41,11 @@ pub struct Folder {
     pub is_monitored: bool,
     #[serde(rename = "assetCount")]
     pub asset_count: Option<usize>,
+    /// 文件夹磁盘修改时间（RFC3339）。用于对账增量剪枝：仅当目录 mtime 与
+    /// 库内记录的 mtime 不一致时，才认为该目录存在结构级变化需要深扫。
+    /// 前端传入的 Folder JSON 中通常不含该字段，故设为默认缺失。
+    #[serde(default)]
+    pub mtime: Option<String>,
 }
 
 /// 标签实体模型 (Tag)
