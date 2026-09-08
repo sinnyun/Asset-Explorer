@@ -1,28 +1,27 @@
 //! ============================================================================
 //! 模块：文件监控 (watcher.rs)
-//! 职责：使用 notify-debouncer-full 监听用户已添加到工作区的文件夹变动
-//! （新增、重命名、删除、修改），事件自动去抖后批量更新数据库，
-//! 大幅减少高频 I/O 产生的数据库写入次数。
-//! 依赖开源库：`notify-debouncer-full`, `tauri`, `chrono`
+//! 职责：使用 notify 库实时监控已监控文件夹的变动
+//! (新增、删除、修改、重命名)，事件经轻量级去抖聚合后批量更新数据库。
+//! 支持运行时动态注册/注销监控文件夹，解决"新添加文件夹不实时监控"问题。
+//! 依赖开源库：`notify`, `tauri`, `chrono`, `parking_lot`
 //! ============================================================================
 
 use crate::database::Database;
 use crate::indexer::{infer_category_from_extension, stable_hash};
 use chrono::Utc;
-use notify_debouncer_full::new_debouncer;
-use notify_debouncer_full::notify::{RecursiveMode, Watcher};
-use notify_debouncer_full::notify::EventKind;
-use notify_debouncer_full::DebounceEventResult;
+use notify::event::ModifyKind;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use parking_lot::Mutex;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
-use tauri::Emitter;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
 /// 发送给前端的事件载荷
-/// - added / modified: 携带完整资产对象，前端可直接增量合并进状态（无需全量重载）
-/// - removed: 仅携带 asset_id 与 path，前端按 ID 增量删除
 #[derive(Clone, Serialize)]
 pub struct AssetChangeEvent {
     pub asset_id: Option<String>,
@@ -32,212 +31,394 @@ pub struct AssetChangeEvent {
     pub asset: Option<crate::models::Asset>,
 }
 
-/// 启动文件监控器，监听所有已监控文件夹的变更
-/// 使用 notify-debouncer-full 开源库实现事件去抖：
-/// - 连续文件操作（如批量解压、IDE 保存、批量重命名）会在防抖窗口内聚合
-/// - 只有窗口结束后首次触发 handler，显著减少数据库写入次数 (约减少 90%)
-pub fn start_file_watcher(app_handle: tauri::AppHandle, db: Arc<Database>) {
-    let monitored_folders = match db.get_monitored_folders() {
-        Ok(folders) => folders,
-        Err(e) => {
-            eprintln!("[Watcher] 获取监控文件夹列表失败: {}", e);
-            return;
-        }
-    };
+/// 全局文件监控注册表
+///
+/// 使用 notify::RecommendedWatcher 提供跨平台实时文件变更检测。
+/// - add_folder / remove_folder 支持运行时动态添加/移除监控路径
+/// - 事件通过 channel 发送至后台线程，经轻量去抖聚合后批量处理
+pub struct WatcherRegistry {
+    watcher: Mutex<RecommendedWatcher>,
+    watched_paths: Mutex<HashSet<String>>,
+}
 
-    if monitored_folders.is_empty() {
-        println!("[Watcher] 没有已监控的文件夹，跳过文件监控启动");
+impl WatcherRegistry {
+    /// 创建全局文件监控器，注册所有已监控的文件夹，并启动后台事件处理线程。
+    pub fn new(app_handle: AppHandle, db: Arc<Database>) -> Result<Self, String> {
+        let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
+
+        let mut watcher = notify::recommended_watcher(
+            move |res: Result<Event, notify::Error>| {
+                let _ = tx.send(res);
+            },
+        )
+        .map_err(|e| format!("创建文件监控器失败: {}", e))?;
+
+        let watched_paths = Mutex::new(HashSet::new());
+
+        // 注册启动时已存在的所有监控文件夹
+        if let Ok(folders) = db.get_monitored_folders() {
+            for folder in &folders {
+                let path = Path::new(&folder.path);
+                if !path.exists() {
+                    eprintln!("[Watcher] 监控路径不存在，跳过: {}", folder.path);
+                    continue;
+                }
+                if let Err(e) = watcher.watch(path, RecursiveMode::Recursive) {
+                    eprintln!("[Watcher] 注册监听失败 {}: {}", folder.path, e);
+                } else {
+                    watched_paths.lock().insert(folder.path.clone());
+                    println!("[Watcher] 开始监视: {} (id: {})", folder.path, folder.id);
+                }
+            }
+        }
+
+        // 启动后台事件处理线程
+        let handle_db = db.clone();
+        std::thread::spawn(move || {
+            event_processing_loop(&app_handle, &handle_db, &rx);
+        });
+
+        Ok(WatcherRegistry {
+            watcher: Mutex::new(watcher),
+            watched_paths,
+        })
+    }
+
+    /// 动态注册一个文件夹到监控列表
+    pub fn add_folder(&self, path: &str) -> Result<(), String> {
+        {
+            let paths = self.watched_paths.lock();
+            if paths.contains(path) {
+                return Ok(());
+            }
+        }
+
+        let p = Path::new(path);
+        if !p.exists() {
+            return Err(format!("监控路径不存在: {}", path));
+        }
+        if !p.is_dir() {
+            return Err(format!("路径不是有效目录: {}", path));
+        }
+
+        let mut w = self.watcher.lock();
+        w.watch(p, RecursiveMode::Recursive)
+            .map_err(|e| format!("注册文件监听失败 {}: {}", path, e))?;
+        drop(w);
+
+        self.watched_paths.lock().insert(path.to_string());
+        println!("[Watcher] 动态添加监控: {}", path);
+        Ok(())
+    }
+
+    /// 动态注销一个文件夹
+    pub fn remove_folder(&self, path: &str) -> Result<(), String> {
+        let was_watched = self.watched_paths.lock().contains(path);
+        if !was_watched {
+            return Ok(());
+        }
+
+        let p = Path::new(path);
+        let mut w = self.watcher.lock();
+        let _ = w.unwatch(p);
+        drop(w);
+
+        self.watched_paths.lock().remove(path);
+        println!("[Watcher] 动态移除监控: {}", path);
+        Ok(())
+    }
+
+    /// 返回当前所有正在被监控的文件夹路径
+    #[allow(dead_code)]
+    pub fn get_watched_paths(&self) -> Vec<String> {
+        self.watched_paths.lock().iter().cloned().collect()
+    }
+}
+
+/// 后台事件处理循环
+fn event_processing_loop(
+    app_handle: &AppHandle,
+    db: &Database,
+    rx: &mpsc::Receiver<Result<Event, notify::Error>>,
+) {
+    println!("[Watcher] 事件处理线程已启动");
+
+    let mut pending: Vec<Event> = Vec::new();
+    let mut last_flush = Instant::now();
+    const FLUSH_INTERVAL: Duration = Duration::from_millis(300);
+    const MAX_BATCH_SIZE: usize = 200;
+
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(event)) => {
+                pending.push(event);
+                if pending.len() >= MAX_BATCH_SIZE || last_flush.elapsed() >= FLUSH_INTERVAL {
+                    flush_events(app_handle, db, &pending);
+                    pending.clear();
+                    last_flush = Instant::now();
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("[Watcher] 文件监控错误: {}", e);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !pending.is_empty() && last_flush.elapsed() >= FLUSH_INTERVAL {
+                    flush_events(app_handle, db, &pending);
+                    pending.clear();
+                    last_flush = Instant::now();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("[Watcher] 事件通道已断开，监控线程退出");
+                break;
+            }
+        }
+    }
+}
+
+/// 批量处理积累的文件事件
+fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
+    if events.is_empty() {
         return;
     }
 
-    println!("[Watcher] 启动文件监控（防抖 500ms），共 {} 个监控文件夹", monitored_folders.len());
-
-    let (tx, rx) = std::sync::mpsc::channel::<DebounceEventResult>();
-
-    let mut debouncer = match new_debouncer(
-        Duration::from_millis(500), // 500ms 防抖窗口
-        None,                        // 使用默认 ticker
-        move |res| {
-            let _ = tx.send(res);
-        },
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("[Watcher] 创建去抖文件监控器失败: {}", e);
-            return;
-        }
-    };
-
-    // 为每个监控文件夹注册递归监听
-    for folder in &monitored_folders {
-        let path = Path::new(&folder.path);
-        if !path.exists() {
-            eprintln!("[Watcher] 监控路径不存在，跳过: {}", folder.path);
-            continue;
-        }
-        // 使用 notify-debouncer-full 内置的 watcher 注册监听
-        let watcher = debouncer.watcher();
-        if let Err(e) = watcher.watch(path, RecursiveMode::Recursive) {
-            eprintln!("[Watcher] 注册监听失败 {}: {}", folder.path, e);
-        } else {
-            println!("[Watcher] 开始监视: {} (id: {})", folder.path, folder.id);
-        }
-    }
-
-    // 后台线程处理去抖后的事件批次
-    // 注意：将 debouncer move 进线程保持存活，确保文件监控持续运行
-    std::thread::spawn(move || {
-        // 持有 debouncer，防止其被 drop 导致文件监控停止
-        let _debouncer = debouncer;
-        while let Ok(Ok(events)) = rx.recv() {
-            if let Err(e) = handle_batch_file_events(&app_handle, &db, &events) {
-                eprintln!("[Watcher] 处理批量文件事件失败: {}", e);
-            }
-        }
-    });
-}
-
-/// 处理一批去抖后的文件事件
-/// 将同一防抖窗口内的多个事件按 path 聚合去重，批量处理
-fn handle_batch_file_events(
-    app_handle: &tauri::AppHandle,
-    db: &Database,
-    events: &[notify_debouncer_full::DebouncedEvent],
-) -> Result<(), String> {
-    // 聚合事件：同一路径多次变更只处理最后一次状态
-    // path → (action, is_dir)
-    let mut additions: Vec<String> = Vec::new();
-    let mut removals: Vec<String> = Vec::new();
-    let mut modifications: Vec<String> = Vec::new();
+    let mut additions: HashSet<String> = HashSet::new();
+    let mut removals: HashSet<String> = HashSet::new();
+    let mut modifications: HashSet<String> = HashSet::new();
 
     for event in events {
-        for path in &event.event.paths {
-            let path_str = path.to_string_lossy().to_string();
-
-            // DebouncedEvent 内部包裹 notify::Event（event 字段）
-            let kind = &event.event.kind;
-
-            match kind {
-                EventKind::Create(_) => {
-                    // 文件可能仍存在（去抖后保留状态）
+        match &event.kind {
+            EventKind::Create(_) => {
+                for path in &event.paths {
                     if path.is_file() {
-                        if !additions.contains(&path_str) {
-                            additions.push(path_str.clone());
-                        }
+                        additions.insert(path.to_string_lossy().to_string());
                     } else if path.is_dir() {
-                        // 目录创建需要触发重新扫描子目录中的文件
-                        // 简化处理：目录变化标记为 modification，后续扫描对应文件夹
-                        if !modifications.contains(&path_str) {
-                            modifications.push(path_str.clone());
+                        // 目录创建：扫描其中包含的文件并加入索引
+                        if let Err(e) = scan_new_directory(app_handle, db, path) {
+                            eprintln!("[Watcher] 扫描新目录失败 {}: {}", path.display(), e);
                         }
                     }
                 }
-                EventKind::Remove(_) => {
-                    if !removals.contains(&path_str) {
-                        removals.push(path_str);
-                    }
+            }
+            EventKind::Remove(_) => {
+                for path in &event.paths {
+                    removals.insert(path.to_string_lossy().to_string());
                 }
-                EventKind::Modify(_) => {
-                    if path.is_file() {
-                        if !modifications.contains(&path_str) {
-                            modifications.push(path_str);
+            }
+            EventKind::Modify(kind) => match kind {
+                ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any => {
+                    // 内容或元数据修改
+                    for path in &event.paths {
+                        if path.is_file() {
+                            let path_str = path.to_string_lossy().to_string();
+                            if db.get_asset_by_path(&path_str).ok().flatten().is_some() {
+                                modifications.insert(path_str);
+                            } else {
+                                additions.insert(path_str);
+                            }
                         }
                     }
+                }
+                ModifyKind::Name(_) => {
+                    // 重命名/移动事件
+                    handle_rename_event(app_handle, db, event, &mut additions, &mut removals, &mut modifications);
                 }
                 _ => {}
-            }
+            },
+            _ => {}
         }
     }
 
-    // 批量处理删除事件
+    // 处理删除
     if !removals.is_empty() {
-        // 先查每个待删路径的 asset_id，事件中携带 → 前端可按 ID 精确增量删除
-        let mut removed_ids: Vec<(String, String)> = Vec::new(); // (asset_id, path)
-        for path_str in &removals {
-            if let Ok(Some(asset)) = db.get_asset_by_path(path_str) {
-                removed_ids.push((asset.id, path_str.clone()));
-            }
-        }
-
-        let deleted = db.delete_assets_by_paths(&removals)?;
-        if deleted > 0 {
-            println!("[Watcher] 批量删除 {} 个文件", deleted);
-            let mut emitted_paths: Vec<String> = Vec::new();
-            for (asset_id, path) in removed_ids {
-                emitted_paths.push(path.clone());
-                let _ = app_handle.emit("asset:removed", AssetChangeEvent {
-                    asset_id: Some(asset_id),
-                    path,
-                    action: "removed".to_string(),
-                    asset: None,
-                });
-            }
-            // 数据库中可能还存在未能查到 asset_id 的记录（如被外部修改），按 path 兜底广播
-            for path in &removals {
-                if !emitted_paths.contains(path) {
-                    let _ = app_handle.emit("asset:removed", AssetChangeEvent {
-                        asset_id: None,
-                        path: path.clone(),
-                        action: "removed".to_string(),
-                        asset: None,
-                    });
-                }
-            }
-        }
+        handle_removals(app_handle, db, &removals);
     }
 
-    // 批量处理新增事件
+    // 处理新增
     for path_str in &additions {
-        let path = Path::new(path_str);
-        if let Err(e) = handle_file_added(app_handle, db, path) {
+        if let Err(e) = handle_file_added(app_handle, db, Path::new(path_str)) {
             eprintln!("[Watcher] 添加文件失败 {}: {}", path_str, e);
         }
     }
 
-    // 批量处理修改事件
+    // 处理修改
     for path_str in &modifications {
-        let path = Path::new(path_str);
-        if let Err(e) = handle_file_modified(app_handle, db, path) {
+        if let Err(e) = handle_file_modified(app_handle, db, Path::new(path_str)) {
             eprintln!("[Watcher] 修改文件失败 {}: {}", path_str, e);
         }
+    }
+}
+
+/// 处理重命名事件
+fn handle_rename_event(
+    _app_handle: &AppHandle,
+    db: &Database,
+    event: &Event,
+    additions: &mut HashSet<String>,
+    removals: &mut HashSet<String>,
+    modifications: &mut HashSet<String>,
+) {
+    // 收集事件涉及的所有路径
+    let all_paths: Vec<String> = event.paths.iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    for path_str in all_paths {
+        let p = Path::new(&path_str);
+        let in_db = db.get_asset_by_path(&path_str).ok().flatten().is_some();
+
+        if in_db && !p.exists() {
+            // 旧路径：在 DB 但磁盘上已不存在 → 删除
+            removals.insert(path_str);
+        } else if !in_db && p.exists() && p.is_file() {
+            // 新路径：磁盘上存在但不在 DB → 添加
+            additions.insert(path_str);
+        } else if in_db && p.exists() && p.is_file() {
+            // 同名路径修改
+            modifications.insert(path_str);
+        }
+    }
+}
+
+/// 扫描新创建的目录中的文件，批量加入索引
+fn scan_new_directory(app_handle: &AppHandle, db: &Database, dir_path: &Path) -> Result<(), String> {
+    if !dir_path.exists() || !dir_path.is_dir() {
+        return Ok(());
+    }
+
+    // 递归收集所有子目录中的文件
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![dir_path.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.is_file() {
+                files.push(p);
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    // 获取文件夹列表用于匹配 folder_id
+    let folders = db.get_folders()?;
+    let mut new_assets: Vec<crate::models::Asset> = Vec::new();
+
+    for file_path in files {
+        let path_str = file_path.to_string_lossy().to_string();
+        if db.get_asset_by_path(&path_str)?.is_some() {
+            continue;
+        }
+
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if infer_category_from_extension(ext) == "other" {
+            continue;
+        }
+
+        let mut asset = create_asset_from_path(&file_path)?;
+        if let Some(folder_id) = find_matching_folder(&folders, &path_str) {
+            asset.folder_id = folder_id;
+        }
+        new_assets.push(asset);
+    }
+
+    if !new_assets.is_empty() {
+        db.batch_save_assets(&new_assets)?;
+        for asset in &new_assets {
+            let _ = app_handle.emit("asset:added", AssetChangeEvent {
+                asset_id: Some(asset.id.clone()),
+                path: asset.path.clone(),
+                action: "added".to_string(),
+                asset: Some(asset.clone()),
+            });
+        }
+        println!("[Watcher] 新目录扫描完成，索引 {} 个文件", new_assets.len());
     }
 
     Ok(())
 }
 
+/// 批量处理删除事件
+fn handle_removals(app_handle: &AppHandle, db: &Database, removals: &HashSet<String>) {
+    let removals_vec: Vec<String> = removals.iter().cloned().collect();
+    if removals_vec.is_empty() {
+        return;
+    }
+
+    let mut removed_ids: Vec<(String, String)> = Vec::new();
+    for path_str in &removals_vec {
+        if let Ok(Some(asset)) = db.get_asset_by_path(path_str) {
+            removed_ids.push((asset.id, path_str.clone()));
+        }
+    }
+
+    let deleted = match db.delete_assets_by_paths(&removals_vec) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[Watcher] 批量删除资产失败: {}", e);
+            return;
+        }
+    };
+
+    if deleted > 0 {
+        println!("[Watcher] 批量删除 {} 个文件", deleted);
+        let mut emitted: HashSet<String> = HashSet::new();
+        for (asset_id, path) in &removed_ids {
+            emitted.insert(path.clone());
+            let _ = app_handle.emit("asset:removed", AssetChangeEvent {
+                asset_id: Some(asset_id.clone()),
+                path: path.clone(),
+                action: "removed".to_string(),
+                asset: None,
+            });
+        }
+        // 未能查到 asset_id 的删除路径也广播
+        for path in &removals_vec {
+            if !emitted.contains(path) {
+                let _ = app_handle.emit("asset:removed", AssetChangeEvent {
+                    asset_id: None,
+                    path: path.clone(),
+                    action: "removed".to_string(),
+                    asset: None,
+                });
+            }
+        }
+    }
+}
+
 /// 处理单个新增文件
-fn handle_file_added(app_handle: &tauri::AppHandle, db: &Database, path: &Path) -> Result<(), String> {
+fn handle_file_added(app_handle: &AppHandle, db: &Database, path: &Path) -> Result<(), String> {
     if !path.exists() || !path.is_file() {
         return Ok(());
     }
 
-    // 检查文件扩展名是否支持
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let category = infer_category_from_extension(ext);
-    if category == "other" {
-        return Ok(()); // 不支持的格式跳过
+    if infer_category_from_extension(ext) == "other" {
+        return Ok(());
     }
 
-    // 检查是否已存在（避免重复处理）
     let path_str = path.to_string_lossy().to_string();
     if db.get_asset_by_path(&path_str)?.is_some() {
-        return Ok(()); // 已在数据库中
+        return Ok(());
     }
 
-    // 扫描新文件并添加到数据库
     let mut asset = create_asset_from_path(path)?;
-
-    // 根据路径前缀找到正确的父文件夹并设置 folder_id
-    // 这样前端增量合并时 asset.folderId 正确关联
     let folders = db.get_folders()?;
-    if let Some(parent_folder_id) = find_matching_folder(&folders, &path_str) {
-        asset.folder_id = parent_folder_id;
+    if let Some(folder_id) = find_matching_folder(&folders, &path_str) {
+        asset.folder_id = folder_id;
     }
 
-    // 持久化单个资产（UPSERT 幂等）
     db.batch_save_assets(&[asset.clone()])?;
 
-    // 发送事件给前端（携带完整资产数据 → 前端可直接增量合并，无需全量重载）
     let _ = app_handle.emit("asset:added", AssetChangeEvent {
         asset_id: Some(asset.id.clone()),
         path: path_str.clone(),
@@ -248,34 +429,33 @@ fn handle_file_added(app_handle: &tauri::AppHandle, db: &Database, path: &Path) 
     Ok(())
 }
 
-/// 处理单个修改文件
-fn handle_file_modified(app_handle: &tauri::AppHandle, db: &Database, path: &Path) -> Result<(), String> {
+/// 处理单个文件修改
+fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> Result<(), String> {
     if !path.exists() || !path.is_file() {
         return Ok(());
     }
 
     let path_str = path.to_string_lossy().to_string();
-    // 检查数据库中是否存在
     if let Some(existing) = db.get_asset_by_path(&path_str)? {
         let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
-        let modified = metadata.modified().ok();
-        let new_date = modified
+        let new_date = metadata
+            .modified()
+            .ok()
             .map(|t| {
                 let dt: chrono::DateTime<Utc> = t.into();
                 dt.to_rfc3339()
             })
             .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-        // 只更新 metadata 变更的内容
         db.update_asset_field(&existing.id, "date_modified", &new_date)?;
         db.update_asset_field(&existing.id, "size", &metadata.len().to_string())?;
 
-        // 构造完整的最新资产对象（更新 date_modified 与 size 后再广播）
         let updated_asset = crate::models::Asset {
             size: metadata.len(),
             date_modified: new_date.clone(),
             ..existing.clone()
         };
+
         let _ = app_handle.emit("asset:modified", AssetChangeEvent {
             asset_id: Some(existing.id.clone()),
             path: path_str.clone(),
@@ -322,7 +502,7 @@ fn create_asset_from_path(path: &Path) -> Result<crate::models::Asset, String> {
         path: file_str,
         asset_type,
         size: file_size,
-        folder_id: String::new(), // 由调用者填充
+        folder_id: String::new(),
         tags: Vec::new(),
         collections: Vec::new(),
         date_modified: modified_time,
@@ -338,25 +518,22 @@ fn create_asset_from_path(path: &Path) -> Result<crate::models::Asset, String> {
 }
 
 /// 根据文件路径找到最匹配的文件夹（路径前缀最长匹配）
-/// 用于新增文件时正确设置 asset.folder_id
 fn find_matching_folder(folders: &[crate::models::Folder], file_path: &str) -> Option<String> {
     let file_lower = file_path.trim_end_matches(|c| c == '/' || c == '\\').to_lowercase();
-    let mut best_match: Option<(usize, String)> = None; // (path_len, folder_id)
-    
+    let mut best_match: Option<(usize, String)> = None;
+
     for folder in folders {
         let fp = folder.path.trim_end_matches(|c| c == '/' || c == '\\').to_lowercase();
-        // 检查文件路径是否以该文件夹路径为前缀（考虑路径分隔符）
         if file_lower == fp {
-            continue; // 文件路径不可能等于文件夹路径
+            continue;
         }
         if file_lower.starts_with(&format!("{}/", fp)) || file_lower.starts_with(&format!("{}\\", fp)) {
             let prefix_len = fp.len();
-            // 选择路径前缀最长的匹配（最深的文件夹）
             if best_match.as_ref().map_or(true, |(len, _)| prefix_len > *len) {
                 best_match = Some((prefix_len, folder.id.clone()));
             }
         }
     }
-    
+
     best_match.map(|(_, id)| id)
 }

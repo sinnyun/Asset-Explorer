@@ -14,6 +14,7 @@ use commands::*;
 use database::Database;
 use std::sync::Arc;
 use tauri::Manager;
+use watcher::WatcherRegistry;
 
 fn main() {
     // 初始化本地 SQLite 数据库 (高并发 WAL 模式)
@@ -56,9 +57,17 @@ fn main() {
         // ====================================================================
         .setup(move |app| {
             println!("[Startup] Tauri 应用启动中，开始初始化监控...");
-            // 启动文件监控器，监听已监控文件夹的变更
+            // 创建全局文件监控注册表，支持运行时动态添加/移除监控文件夹
             let app_handle = app.handle().clone();
-            watcher::start_file_watcher(app_handle, Arc::new(db_for_setup.clone()));
+            match WatcherRegistry::new(app_handle.clone(), Arc::new(db_for_setup.clone())) {
+                Ok(registry) => {
+                    app.manage(registry);
+                    println!("[Startup] 文件监控器初始化完成");
+                }
+                Err(e) => {
+                    eprintln!("[Startup] 文件监控器初始化失败: {}", e);
+                }
+            }
 
             // 资产有效性校验移至后台线程异步执行，不阻塞 Tauri 主线程与首帧渲染
             // 前端 useAppState 不再调用 validate_assets + 二次 loadWorkspace，
@@ -94,6 +103,8 @@ fn main() {
             load_workspace,
             scan_directory,
             start_scan_directory,
+            watch_folder,
+            unwatch_folder,
             search_assets,
             set_asset_rating,
             set_asset_favorite,
