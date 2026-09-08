@@ -63,6 +63,20 @@ export function useAppState() {
         const loaded = await dataService.loadWorkspace();
         // 已成功取得数据（即使为空也是成功响应，无需重试）
         if (loaded && ('assets' in loaded || 'folders' in loaded)) {
+          // assets 按 id 去重后再合并：虽然 DB 层有 PRIMARY KEY 约束不产生重复，
+          // 但 loadWorkspace 返回的数据可能会与已通过 scan:chunk/asset:added 事件
+          // 进入 state 的资产叠加，确保 assets 数组内 id 全局唯一。
+          if (Array.isArray(loaded.assets) && loaded.assets.length > 0) {
+            const seen = new Set<string>();
+            const deduped = loaded.assets.filter((a: any) => {
+              if (!a?.id || seen.has(a.id)) return false;
+              seen.add(a.id);
+              return true;
+            });
+            if (deduped.length !== loaded.assets.length) {
+              loaded.assets = deduped;
+            }
+          }
           setState(prev => ({ ...prev, ...loaded }));
         } else if (loadAttemptRef.current < 3) {
           // loadWorkspace 返回 null/undefined → IPC 可能尚未就绪，延迟重试

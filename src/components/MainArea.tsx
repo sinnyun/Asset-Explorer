@@ -257,7 +257,13 @@ export function MainArea({
         const f = foldersById.get(a.folderId);
         if (f) groupsMap.set(f.id, { folder: f, assets: [] });
       }
-      groupsMap.get(a.folderId)?.assets.push(a);
+      const group = groupsMap.get(a.folderId);
+      if (group) {
+        // 防御性去重：同一 folder group 内 asset.id 唯一，杜绝 React key 重复渲染警告
+        if (!group.assets.some(existing => existing.id === a.id)) {
+          group.assets.push(a);
+        }
+      }
     });
     
     // Add independently matched folders
