@@ -181,9 +181,21 @@ export function useEntityActions(
 
   const handleUpdateFolder = (id: string, updates: Partial<FolderType>) => {
     setState(prev => {
+      // 调试：当"本地监视工作区"开关被切换时，在控制台打印前后状态，便于确认链路是否传向后端
+      if ('isMonitored' in updates) {
+        const before = prev.folders.find(f => f.id === id);
+        console.log(
+          `[Monitor] 文件夹监视开关被切换: id=${id}, path=${before?.path}, isMonitored: ${before?.isMonitored} -> ${updates.isMonitored}`
+        );
+      }
       const updated = prev.folders.map(f => f.id === id ? { ...f, ...updates } : f);
       const target = updated.find(f => f.id === id);
-      if (target) dataService.updateFolder(target);
+      if (target) {
+        if ('isMonitored' in updates) {
+          console.log(`[Monitor] 调用 dataService.updateFolder 推送后端: id=${id}, isMonitored=${target.isMonitored}, path=${target.path}`);
+        }
+        dataService.updateFolder(target);
+      }
       return { ...prev, folders: updated };
     });
   };

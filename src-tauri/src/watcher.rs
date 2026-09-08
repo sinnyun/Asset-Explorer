@@ -56,20 +56,29 @@ impl WatcherRegistry {
         let watched_paths = Mutex::new(HashSet::new());
 
         // 注册启动时已存在的所有监控文件夹
+        let mut registered_count: usize = 0;
+        let mut skipped_count: usize = 0;
         if let Ok(folders) = db.get_monitored_folders() {
+            println!("[Watcher] 启动时从数据库读取到 {} 个已监视文件夹(DB is_monitored=1)", folders.len());
             for folder in &folders {
                 let path = Path::new(&folder.path);
                 if !path.exists() {
                     eprintln!("[Watcher] 监控路径不存在，跳过: {}", folder.path);
+                    skipped_count += 1;
                     continue;
                 }
                 if let Err(e) = watcher.watch(path, RecursiveMode::Recursive) {
                     eprintln!("[Watcher] 注册监听失败 {}: {}", folder.path, e);
+                    skipped_count += 1;
                 } else {
                     watched_paths.lock().insert(folder.path.clone());
+                    registered_count += 1;
                     println!("[Watcher] 开始监视: {} (id: {})", folder.path, folder.id);
                 }
             }
+            println!("[Watcher] 启动注册完成: 成功 {} 个, 跳过/失败 {} 个", registered_count, skipped_count);
+        } else {
+            println!("[Watcher] 启动时读取已监视文件夹失败（DB 无记录或出错）");
         }
 
         // 启动后台事件处理线程
@@ -247,6 +256,15 @@ fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
             eprintln!("[Watcher] 修改文件失败 {}: {}", path_str, e);
         }
     }
+
+    // 调试汇总：每批事件处理完后打印本批分类统计，便于确认"事件是否被正确感知与落库"
+    println!(
+        "[Watcher] 事件批处理完成: 原始事件 {} 个, 待新增 {} 个, 待删除 {} 个, 待修改 {} 个",
+        events.len(),
+        additions.len(),
+        removals.len(),
+        modifications.len()
+    );
 }
 
 /// 处理重命名事件
@@ -345,6 +363,101 @@ fn scan_new_directory(app_handle: &AppHandle, db: &Database, dir_path: &Path) ->
     }
 
     Ok(())
+}
+
+/// 供外部在"开启本地监视工作区"时调用：将该已存在目录下尚未入库的既有文件
+/// 一次性补齐索引进数据库，并向前端广播 asset:added，使监视开启前的历史素材也能即时显示。
+/// 与 scan_new_directory 逻辑一致，幂等：已入库文件会跳过、重复调用安全。
+pub fn backfill_existing_assets(
+    app_handle: &AppHandle,
+    db: &Database,
+    dir_path: &Path,
+    origin: &str,
+) -> Result<usize, String> {
+    if !dir_path.exists() || !dir_path.is_dir() {
+        eprintln!("[Watcher] [{}] 补齐索引失败: 目录不存在或不是目录: {}", origin, dir_path.display());
+        return Ok(0);
+    }
+
+    // 递归收集所有子目录中的文件
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![dir_path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[Watcher] [{}] 读取子目录失败 {}: {}", origin, dir.display(), e);
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.is_file() {
+                files.push(p);
+            }
+        }
+    }
+
+    if files.is_empty() {
+        println!("[Watcher] [{}] 补齐索引: 目录内无可索引文件: {}", origin, dir_path.display());
+        return Ok(0);
+    }
+
+    let folders = db.get_folders()?;
+    let mut new_assets: Vec<crate::models::Asset> = Vec::new();
+    let mut skipped_existing = 0usize;
+    let mut skipped_other = 0usize;
+
+    let total_files = files.len();
+    for file_path in &files {
+        let path_str = file_path.to_string_lossy().to_string();
+
+        // 已在库中则跳过
+        if db.get_asset_by_path(&path_str)?.is_some() {
+            skipped_existing += 1;
+            continue;
+        }
+        // 非资产扩展名跳过
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if infer_category_from_extension(ext) == "other" {
+            skipped_other += 1;
+            continue;
+        }
+
+        let mut asset = create_asset_from_path(file_path)?;
+        if let Some(folder_id) = find_matching_folder(&folders, &path_str) {
+            asset.folder_id = folder_id;
+        }
+        new_assets.push(asset);
+    }
+
+    let added = new_assets.len();
+    println!(
+        "[Watcher] [{}] 补齐索引结果: 扫描 {} 个文件, 新增入库 {} 个, 已存在跳过 {} 个, 非资产跳过 {} 个, 目录: {}",
+        origin,
+        total_files,
+        added,
+        skipped_existing,
+        skipped_other,
+        dir_path.display()
+    );
+
+    if !new_assets.is_empty() {
+        db.batch_save_assets(&new_assets)?;
+        for asset in &new_assets {
+            println!("[Watcher] [{}] 补齐入库并广播: {}", origin, asset.path);
+            let _ = app_handle.emit("asset:added", AssetChangeEvent {
+                asset_id: Some(asset.id.clone()),
+                path: asset.path.clone(),
+                action: "added".to_string(),
+                asset: Some(asset.clone()),
+            });
+        }
+    }
+
+    Ok(added)
 }
 
 /// 批量处理删除事件

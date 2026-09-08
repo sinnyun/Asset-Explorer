@@ -143,11 +143,13 @@ export function useFileMonitoring(
         const unlistenAdd = await listen<FileMonitoringPayload>('asset:added', (ev) => {
           const payload = ev.payload;
           const newAsset = payload?.asset;
+          console.log('[Monitor][前端] 收到 asset:added 事件:', newAsset?.path ?? payload?.path ?? '(空)');
 
           if (newAsset && newAsset.id) {
             pendingAddsRef.current.set(newAsset.id, newAsset);
             scheduleFlush();
           } else {
+            console.warn('[Monitor][前端] asset:added 缺少完整资产载荷，触发全量刷新兜底');
             triggerFullReloadFallback();
           }
         });
@@ -156,6 +158,7 @@ export function useFileMonitoring(
         const unlistenRemove = await listen<FileMonitoringPayload>('asset:removed', (ev) => {
           const payload = ev.payload;
           if (!payload) return;
+          console.log('[Monitor][前端] 收到 asset:removed 事件:', payload.path ?? payload.asset_id ?? '(空)');
           if (payload.asset_id) {
             pendingRemovesRef.current.ids.add(payload.asset_id);
           }
@@ -169,11 +172,13 @@ export function useFileMonitoring(
         const unlistenModify = await listen<FileMonitoringPayload>('asset:modified', (ev) => {
           const payload = ev.payload;
           const updatedAsset = payload?.asset;
+          console.log('[Monitor][前端] 收到 asset:modified 事件:', updatedAsset?.path ?? payload?.path ?? '(空)');
 
           if (updatedAsset && updatedAsset.id) {
             pendingModifiesRef.current.set(updatedAsset.id, updatedAsset);
             scheduleFlush();
           } else {
+            console.warn('[Monitor][前端] asset:modified 缺少完整资产载荷，触发全量刷新兜底');
             triggerFullReloadFallback();
           }
         });
