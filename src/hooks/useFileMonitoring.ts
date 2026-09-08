@@ -85,11 +85,31 @@ export function useFileMonitoring(
           });
         }
 
-        // 3. 执行新增（去重后首部插入）
+        // 3. 执行新增（按 id 去重后首部插入）
         if (adds.length > 0) {
           const existingIds = new Set(nextAssets.map(a => a.id));
-          const toPrepend = adds.filter(a => !existingIds.has(a.id));
-          nextAssets = [...toPrepend, ...nextAssets];
+          // adds 内部也做去重，防止多路事件源对同一文件重复上报产生同 id 资产
+          const seenInAdds = new Set<string>();
+          const uniqueAdds = adds.filter(a => {
+            if (existingIds.has(a.id) || seenInAdds.has(a.id)) return false;
+            seenInAdds.add(a.id);
+            return true;
+          });
+          nextAssets = [...uniqueAdds, ...nextAssets];
+        }
+
+        // 4. 兜底去重：确保整个 assets 数组中 id 全局唯一（防御由于外部事件/并发
+        //    setState 累积导致的任何历史脏数据，杜绝 React 渲染 key 冲突）
+        const seenAll = new Set<string>();
+        const uniqueAll: typeof nextAssets = [];
+        for (const a of nextAssets) {
+          if (!seenAll.has(a.id)) {
+            seenAll.add(a.id);
+            uniqueAll.push(a);
+          }
+        }
+        if (uniqueAll.length !== nextAssets.length) {
+          nextAssets = uniqueAll;
         }
 
         return { ...prev, assets: nextAssets };

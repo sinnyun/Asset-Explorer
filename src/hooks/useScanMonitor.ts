@@ -81,9 +81,21 @@ export function useScanMonitor(
       pendingAssetsBufferRef.current = [];
       const normalized = normalizeAssets(buffer);
 
+      // Buffer 内部先去重：同一批次中若出现重复 id（可能来自多个 scan 并发推送或
+      // watcher 与扫描器对同一文件的重复上报），只保留最后一条，从根上杜绝
+      // state.assets 出现重复项导致 React 渲染 key 冲突。
+      const seenInBuffer = new Set<string>();
+      const deduped: typeof normalized = [];
+      for (const a of normalized) {
+        if (!seenInBuffer.has(a.id)) {
+          seenInBuffer.add(a.id);
+          deduped.push(a);
+        }
+      }
+
       setState((prev) => {
         const existing = new Set(prev.assets.map((a) => a.id));
-        const toAdd = normalized.filter((a) => !existing.has(a.id));
+        const toAdd = deduped.filter((a) => !existing.has(a.id));
         if (toAdd.length === 0) return prev;
         return { ...prev, assets: [...prev.assets, ...toAdd] };
       });
