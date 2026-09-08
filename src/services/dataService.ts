@@ -165,6 +165,7 @@ class DataService {
    */
   async updateFolder(idOrItem: string | Folder, updates?: Partial<Folder>): Promise<void> {
     if (typeof idOrItem === 'object') {
+      console.log(`[Monitor][DataService] 提交 update_folder 后端: id=${idOrItem.id}, path=${idOrItem.path}, isMonitored=${idOrItem.isMonitored}`);
       apiClient.updateFolder(idOrItem).catch(console.error);
     } else {
       console.warn('[DataService] 请勿使用 updateFolder(id, updates) 形式调用，'

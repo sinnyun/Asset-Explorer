@@ -11,7 +11,7 @@ use crate::indexer::{scan_local_directory, scan_local_directory_incremental};
 use crate::metadata_extractor::extract_metadata;
 use crate::models::{AggregationReport, Asset, Collection, Folder, ScanResult, SmartFolder, Tag};
 use crate::thumbnail_cache::generate_or_get_thumbnail;
-use crate::watcher::WatcherRegistry;
+use crate::watcher::{backfill_existing_assets, WatcherRegistry};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::{Emitter, State};
@@ -299,34 +299,69 @@ pub async fn rename_folder(db: State<'_, Database>, id: String, new_name: String
 pub async fn update_folder(
     db: State<'_, Database>,
     registry: State<'_, WatcherRegistry>,
+    app_handle: tauri::AppHandle,
     folder: Folder,
 ) -> Result<(), String> {
     let db = db.inner().clone();
     let is_monitored = folder.is_monitored;
+    let folder_id = folder.id.clone();
     let folder_path = folder.path.clone();
 
     // 更新前先读取该文件夹旧状态，判断"本地监视工作区"开关是否发生变化
-    let was_monitored = db
+    let was_monitored: Option<bool> = db
         .get_folders()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|f| f.id == folder.id)
+        .ok()
+        .and_then(|folders| folders.into_iter().find(|f| f.id == folder.id))
         .map(|f| f.is_monitored);
+    println!(
+        "[Watcher] update_folder 收到更新请求: id={}, path={}, 目标 is_monitored={}, 库中原值={:?}",
+        folder_id, folder_path, is_monitored, was_monitored
+    );
 
-    tokio::task::spawn_blocking(move || db.update_folder(&folder))
+    // 先持久化该文件夹最新属性（name / path / parent_id / is_monitored）
+    // 注意：db 为 Arc<Database>，此处 clone 一份进入阻塞任务，保留外层 db 供后续补齐索引使用
+    let persist_db = db.clone();
+    tokio::task::spawn_blocking(move || persist_db.update_folder(&folder))
         .await
         .map_err(|e| e.to_string())??;
+    println!(
+        "[Watcher] update_folder 已更新数据库: id={}, is_monitored={}",
+        folder_id, is_monitored
+    );
 
-    // 开关从关→开：动态注册到文件监控器，保证该文件夹内新增文件被实时捕获
-    // 开关从开→关：动态从文件监控器注销，避免无效监听
-    // （此前仅更新 DB 而未同步 watcher，导致用开关开启监视的文件夹新增文件永不显示）
-    if was_monitored != Some(is_monitored) {
-        if is_monitored {
-            if let Err(e) = registry.add_folder(&folder_path) {
-                eprintln!("[Watcher] update_folder 开启监视失败: {}", e);
+    // 仅当开关状态发生改变时才同步文件监控器注册/注销
+    if was_monitored == Some(is_monitored) {
+        println!("[Watcher] update_folder 监视状态未变化，跳过注册/注销: id={}", folder_id);
+        return Ok(());
+    }
+
+    if is_monitored {
+        // 关→开：注册到文件监控器，保证该目录新增/删除/修改文件被实时捕获
+        match registry.add_folder(&folder_path) {
+            Ok(()) => println!("[Watcher] update_folder 开启监视成功，已注册监听: id={}, path={}", folder_id, folder_path),
+            Err(e) => {
+                eprintln!("[Watcher] update_folder 注册文件监听失败: id={}, path={}, err={}", folder_id, folder_path, e);
+                return Err(format!("注册文件监听失败: {}", e));
             }
-        } else {
-            let _ = registry.remove_folder(&folder_path);
+        }
+
+        // 关键补充：开启监视时把该目录【已存在的既有文件】也补齐索引进库并推送前端，
+        // 否则 notify 只监听"开启之后的未来事件"，历史素材永远不会显示（这正是"重启后仍无数据"的根因）。
+        let backfill_path = std::path::PathBuf::from(folder_path);
+        let emit_handle = app_handle.clone();
+        let backfill_db = db.clone();
+        std::thread::spawn(move || {
+            println!("[Watcher] update_folder 开始后台补齐该目录既有文件索引: {}", backfill_path.display());
+            match backfill_existing_assets(&emit_handle, &backfill_db, &backfill_path, "update_folder") {
+                Ok(n) => println!("[Watcher] update_folder 既有文件补齐完成，共新增 {} 个资产: {}", n, backfill_path.display()),
+                Err(e) => eprintln!("[Watcher] update_folder 既有文件补齐失败: {}", e),
+            }
+        });
+    } else {
+        // 开→关：从文件监控器注销，避免无效监听
+        match registry.remove_folder(&folder_path) {
+            Ok(()) => println!("[Watcher] update_folder 关闭监视成功，已注销监听: id={}, path={}", folder_id, folder_path),
+            Err(e) => eprintln!("[Watcher] update_folder 注销文件监听失败: id={}, path={}, err={}", folder_id, folder_path, e),
         }
     }
     Ok(())

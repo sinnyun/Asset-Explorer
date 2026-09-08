@@ -267,7 +267,11 @@ class DesktopApiProvider implements ApiProvider {
   }
 
   async updateFolder(folder: Folder): Promise<void> {
-    await callRust<void>('update_folder', { folder });
+    const res = await callRust<void>('update_folder', { folder });
+    console.log(
+      `[Monitor][Rust] update_folder 调用返回 ${res === null ? '失败(见上方警告)' : '成功'}: ` +
+      `id=${folder.id}, path=${folder.path}, isMonitored=${folder.isMonitored}`
+    );
   }
 
   async deleteFolder(id: string): Promise<void> {
