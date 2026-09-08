@@ -11,6 +11,7 @@ use crate::indexer::{scan_local_directory, scan_local_directory_incremental};
 use crate::metadata_extractor::extract_metadata;
 use crate::models::{AggregationReport, Asset, Collection, Folder, ScanResult, SmartFolder, Tag};
 use crate::thumbnail_cache::generate_or_get_thumbnail;
+use crate::watcher::WatcherRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::{Emitter, State};
@@ -50,8 +51,16 @@ pub async fn load_workspace(db: State<'_, Database>) -> Result<WorkspacePayload,
 
 /// 指令 2: 异步扫描本地目录并写入持久化数据库
 #[tauri::command]
-pub async fn scan_directory(db: State<'_, Database>, path: String) -> Result<ScanResult, String> {
+pub async fn scan_directory(
+    db: State<'_, Database>,
+    registry: State<'_, WatcherRegistry>,
+    path: String,
+) -> Result<ScanResult, String> {
     let db = db.inner().clone();
+
+    // 将路径注册到文件监控器
+    let _ = registry.add_folder(&path);
+
     tokio::task::spawn_blocking(move || {
         let scan_res = scan_local_directory(&path)?;
         // 自动将扫描到的所有文件夹与资产写入 SQLite 数据库持久化
@@ -60,6 +69,25 @@ pub async fn scan_directory(db: State<'_, Database>, path: String) -> Result<Sca
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+
+/// 指令 2d: 动态注册文件夹到文件监控器（运行时添加监视文件夹时调用）
+#[tauri::command]
+pub fn watch_folder(
+    registry: tauri::State<'_, WatcherRegistry>,
+    path: String,
+) -> Result<(), String> {
+    registry.add_folder(&path)
+}
+
+/// 指令 2e: 动态从文件监控器注销文件夹（删除监视文件夹时调用）
+#[tauri::command]
+pub fn unwatch_folder(
+    registry: tauri::State<'_, WatcherRegistry>,
+    path: String,
+) -> Result<(), String> {
+    registry.remove_folder(&path)
 }
 
 /// 指令 2c: 后台增量扫描本地目录（将添加文件进度与 UI 完全分离）
@@ -75,10 +103,16 @@ pub async fn scan_directory(db: State<'_, Database>, path: String) -> Result<Sca
 #[tauri::command]
 pub async fn start_scan_directory(
     db: State<'_, Database>,
+    registry: State<'_, WatcherRegistry>,
     app_handle: tauri::AppHandle,
     path: String,
 ) -> Result<(), String> {
     let db = db.inner().clone();
+
+    // 立即将新路径注册到文件监控器，保证后续文件变更能被实时捕获
+    if let Err(e) = registry.add_folder(&path) {
+        eprintln!("[Watcher] start_scan_directory 注册监控失败: {}", e);
+    }
 
     // 后台线程执行增量扫描，避免占用 Tauri 主线程而阻塞 UI。
     std::thread::spawn(move || {
@@ -229,11 +263,26 @@ pub async fn remove_asset_collections(db: State<'_, Database>, asset_id: String,
 
 /// 指令 6: 后端数据库创建文件夹
 #[tauri::command]
-pub async fn create_folder(db: State<'_, Database>, folder: Folder) -> Result<(), String> {
+pub async fn create_folder(
+    db: State<'_, Database>,
+    registry: State<'_, WatcherRegistry>,
+    folder: Folder,
+) -> Result<(), String> {
     let db = db.inner().clone();
+    let is_monitored = folder.is_monitored;
+    let folder_path = folder.path.clone();
+
     tokio::task::spawn_blocking(move || db.insert_folder(&folder))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+
+    // 若文件夹标记为监控，动态注册到文件监控器
+    if is_monitored {
+        if let Err(e) = registry.add_folder(&folder_path) {
+            eprintln!("[Watcher] create_folder 注册监控失败: {}", e);
+        }
+    }
+    Ok(())
 }
 
 /// 指令 7: 后端数据库重命名文件夹
@@ -256,11 +305,28 @@ pub async fn update_folder(db: State<'_, Database>, folder: Folder) -> Result<()
 
 /// 指令 8: 后端数据库删除文件夹
 #[tauri::command]
-pub async fn delete_folder(db: State<'_, Database>, id: String) -> Result<(), String> {
+pub async fn delete_folder(
+    db: State<'_, Database>,
+    registry: State<'_, WatcherRegistry>,
+    id: String,
+) -> Result<(), String> {
     let db = db.inner().clone();
+
+    // 先查询文件夹路径，若为监控文件夹需从文件监控器中注销
+    let folder_path: Option<String> = {
+        let folders = db.get_folders().unwrap_or_default();
+        folders.iter().find(|f| f.id == id).map(|f| f.path.clone())
+    };
+
     tokio::task::spawn_blocking(move || db.delete_folder(&id))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+
+    // 若该文件夹之前是监控目录，从文件监控器注销
+    if let Some(path) = folder_path {
+        let _ = registry.remove_folder(&path);
+    }
+    Ok(())
 }
 
 /// 指令 9: 后端数据库创建标签
