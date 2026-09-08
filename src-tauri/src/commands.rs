@@ -296,11 +296,40 @@ pub async fn rename_folder(db: State<'_, Database>, id: String, new_name: String
 
 /// 指令 7b: 后端数据库更新文件夹完整属性
 #[tauri::command]
-pub async fn update_folder(db: State<'_, Database>, folder: Folder) -> Result<(), String> {
+pub async fn update_folder(
+    db: State<'_, Database>,
+    registry: State<'_, WatcherRegistry>,
+    folder: Folder,
+) -> Result<(), String> {
     let db = db.inner().clone();
+    let is_monitored = folder.is_monitored;
+    let folder_path = folder.path.clone();
+
+    // 更新前先读取该文件夹旧状态，判断"本地监视工作区"开关是否发生变化
+    let was_monitored = db
+        .get_folders()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|f| f.id == folder.id)
+        .map(|f| f.is_monitored);
+
     tokio::task::spawn_blocking(move || db.update_folder(&folder))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+
+    // 开关从关→开：动态注册到文件监控器，保证该文件夹内新增文件被实时捕获
+    // 开关从开→关：动态从文件监控器注销，避免无效监听
+    // （此前仅更新 DB 而未同步 watcher，导致用开关开启监视的文件夹新增文件永不显示）
+    if was_monitored != Some(is_monitored) {
+        if is_monitored {
+            if let Err(e) = registry.add_folder(&folder_path) {
+                eprintln!("[Watcher] update_folder 开启监视失败: {}", e);
+            }
+        } else {
+            let _ = registry.remove_folder(&folder_path);
+        }
+    }
+    Ok(())
 }
 
 /// 指令 8: 后端数据库删除文件夹
