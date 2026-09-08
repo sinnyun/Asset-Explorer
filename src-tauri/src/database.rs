@@ -832,22 +832,33 @@ impl Database {
         Ok(found)
     }
 
-    /// 更新资产基础属性 (评分/收藏/重命名/颜色)
-    pub fn update_asset_field(&self, id: &str, field: &str, value: &str) -> Result<(), String> {
-        let conn = self.conn.lock();
-        // 若更新 name 字段，FTS 触发器 assets_au 会自动同步全文索引
-        let query = format!("UPDATE assets SET {} = ?1 WHERE id = ?2", field);
-        conn.execute(&query, params![value, id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
     /// 更新资产缩略图 URL（懒加载生成后保存）
     pub fn update_asset_thumbnail_url(&self, id: &str, thumbnail_url: &str) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute(
             "UPDATE assets SET thumbnail_url = ?1 WHERE id = ?2",
             params![thumbnail_url, id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 单语句更新资产的磁盘签名字段（mtime/size/宽高/哈希），供 watcher 快速通道
+    /// 在文件内容被修改后联动重读元数据使用，避免逐字段 UPDATE 的多次往返。
+    pub fn update_asset_signature(
+        &self,
+        asset_id: &str,
+        date_modified: &str,
+        size: u64,
+        width: Option<u32>,
+        height: Option<u32>,
+        file_hash: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE assets SET date_modified = ?1, size = ?2, width = ?3, height = ?4, file_hash = ?5
+             WHERE id = ?6",
+            params![date_modified, size as i64, width, height, file_hash, asset_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -1220,17 +1231,6 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
-    }
-
-    /// 获取位于给定根目录（含本身及所有子孙目录）下的全部文件夹。
-    /// 路径比对同时兼容 Windows/Linux 分隔符与大小写。
-    pub fn get_folders_under(&self, root_path: &str) -> Result<Vec<Folder>, String> {
-        let root = normalize_root(root_path);
-        Ok(self
-            .get_folders()?
-            .into_iter()
-            .filter(|f| is_path_under(&f.path, &root))
-            .collect())
     }
 
     /// 轻量读取某根目录下全部资产的签名 (path, date_modified, size)，

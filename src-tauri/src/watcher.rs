@@ -10,6 +10,7 @@
 
 use crate::database::Database;
 use crate::indexer::{infer_category_from_extension, stable_hash};
+use crate::metadata_extractor;
 use crate::models::{Asset, Folder};
 use crate::sync::{reconcile_root, FolderChangeEvent, ReconcileMode};
 use chrono::Utc;
@@ -17,7 +18,7 @@ use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -202,11 +203,14 @@ fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
         return;
     }
 
-    // 一次性快照库内的目录路径集合，用于区分"删除的是文件还是目录"。
-    let db_folder_paths: HashSet<String> = db
-        .get_folders()
-        .map(|fs| fs.iter().map(|f| f.path.clone()).collect())
-        .unwrap_or_default();
+    // 一次性快照库内目录：既用于区分"删除的是文件还是目录"，
+    // 也构建 路径→id 缓存供本批全部新增文件共享，避免逐文件全表查询。
+    let db_folders = db.get_folders().unwrap_or_default();
+    let db_folder_paths: HashSet<String> = db_folders.iter().map(|f| f.path.clone()).collect();
+    let mut folder_cache: HashMap<String, String> = db_folders
+        .iter()
+        .map(|f| (norm_path(&f.path), f.id.clone()))
+        .collect();
 
     let mut additions: HashSet<String> = HashSet::new();
     let mut removals: HashSet<String> = HashSet::new();
@@ -278,10 +282,10 @@ fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
         handle_removals(app_handle, db, &removals);
     }
 
-    // 处理新增
-    for path_str in &additions {
-        if let Err(e) = handle_file_added(app_handle, db, Path::new(path_str)) {
-            eprintln!("[Watcher] 添加文件失败 {}: {}", path_str, e);
+    // 处理新增（批量：共享目录缓存 + 单事务入库，超大目录拖入时显著减少 DB 往返）
+    if !additions.is_empty() {
+        if let Err(e) = handle_file_additions(app_handle, db, &additions, &mut folder_cache) {
+            eprintln!("[Watcher] 批量添加文件失败: {}", e);
         }
     }
 
@@ -437,38 +441,59 @@ fn handle_removals(app_handle: &AppHandle, db: &Database, removals: &HashSet<Str
     }
 }
 
-/// 处理单个新增文件（快速通道）
-fn handle_file_added(app_handle: &AppHandle, db: &Database, path: &Path) -> Result<(), String> {
-    if !path.exists() || !path.is_file() {
+/// 批量处理新增文件（快速通道）：
+/// 先在内存中构建全部资产并解析归属（目录 id 走本批共享缓存），
+/// 再一次性事务入库，最后统一广播事件。避免逐文件 get_folders()/单条 SAVE
+/// 的 N 次数据库往返，支撑超大目录拖入时的入库吞吐。
+fn handle_file_additions(
+    app_handle: &AppHandle,
+    db: &Database,
+    additions: &HashSet<String>,
+    folder_cache: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    let mut new_assets: Vec<Asset> = Vec::new();
+
+    for path_str in additions {
+        let path = Path::new(path_str);
+        if !path.exists() || !path.is_file() {
+            continue;
+        }
+        // 非资产扩展名跳过
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if infer_category_from_extension(ext) == "other" {
+            continue;
+        }
+        // 已在库中则跳过（幂等）
+        if db.get_asset_by_path(path_str)?.is_some() {
+            continue;
+        }
+        let mut asset = create_asset_from_path(path)?;
+        asset.folder_id = resolve_folder_id(db, path, folder_cache)?;
+        new_assets.push(asset);
+    }
+
+    if new_assets.is_empty() {
         return Ok(());
     }
 
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if infer_category_from_extension(ext) == "other" {
-        return Ok(());
+    // 单事务批量入库（batch_save_assets 内部为事务包裹）
+    db.batch_save_assets(&new_assets)?;
+    println!("[Watcher] 批量新增 {} 个文件入库", new_assets.len());
+
+    for asset in &new_assets {
+        let _ = app_handle.emit("asset:added", AssetChangeEvent {
+            asset_id: Some(asset.id.clone()),
+            path: asset.path.clone(),
+            action: "added".to_string(),
+            asset: Some(asset.clone()),
+        });
     }
-
-    let path_str = path.to_string_lossy().to_string();
-    if db.get_asset_by_path(&path_str)?.is_some() {
-        return Ok(());
-    }
-
-    let mut asset = create_asset_from_path(path)?;
-    asset.folder_id = resolve_folder_id(db, path)?;
-
-    db.batch_save_assets(&[asset.clone()])?;
-
-    let _ = app_handle.emit("asset:added", AssetChangeEvent {
-        asset_id: Some(asset.id.clone()),
-        path: path_str.clone(),
-        action: "added".to_string(),
-        asset: Some(asset.clone()),
-    });
-    println!("[Watcher] 新文件已添加: {}", path_str);
     Ok(())
 }
 
-/// 处理单个文件修改（快速通道）
+/// 处理单个文件修改（快速通道）：
+/// 除 mtime/size 外，联动重读图片宽高与文件哈希（阈值与 sync.rs 对账口径一致），
+/// 保证前端详情面板展示的尺寸/哈希随内容变化保持准确。
 fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> Result<(), String> {
     if !path.exists() || !path.is_file() {
         return Ok(());
@@ -477,6 +502,7 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
     let path_str = path.to_string_lossy().to_string();
     if let Some(existing) = db.get_asset_by_path(&path_str)? {
         let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+        let new_size = metadata.len();
         let new_date = metadata
             .modified()
             .ok()
@@ -486,12 +512,37 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
             })
             .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-        db.update_asset_field(&existing.id, "date_modified", &new_date)?;
-        db.update_asset_field(&existing.id, "size", &metadata.len().to_string())?;
+        // 内容级联动重读：图片重新提取宽高；小文件重算 SHA-256
+        // （大文件跳过全量哈希避免整盘读 IO，保留旧值）
+        let (new_width, new_height) = if existing.asset_type == "image" {
+            let meta = metadata_extractor::extract_metadata(path);
+            (meta.width, meta.height)
+        } else {
+            (existing.width, existing.height)
+        };
+        let new_hash = if new_size <= hash_threshold_for(&existing.asset_type) {
+            metadata_extractor::compute_sha256(path)
+                .ok()
+                .or_else(|| existing.file_hash.clone())
+        } else {
+            existing.file_hash.clone()
+        };
 
-        let updated_asset = crate::models::Asset {
-            size: metadata.len(),
+        db.update_asset_signature(
+            &existing.id,
+            &new_date,
+            new_size,
+            new_width,
+            new_height,
+            new_hash.as_deref(),
+        )?;
+
+        let updated_asset = Asset {
+            size: new_size,
             date_modified: new_date.clone(),
+            width: new_width,
+            height: new_height,
+            file_hash: new_hash,
             ..existing.clone()
         };
 
@@ -506,9 +557,22 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
     Ok(())
 }
 
-/// 解析文件所属文件夹 id：若父目录已有 folder 行则复用；否则向上补建缺失的
-/// 目录链（确定性 id），最终返回父目录的 folder id，确保 file 挂到正确的父目录下。
-fn resolve_folder_id(db: &Database, path: &Path) -> Result<String, String> {
+/// 计算该类型允许全量重算哈希的最大体积（与 sync.rs 对账口径保持一致）。
+fn hash_threshold_for(asset_type: &str) -> u64 {
+    if asset_type == "image" {
+        2 * 1024 * 1024
+    } else {
+        1024 * 1024
+    }
+}
+
+/// 解析文件所属文件夹 id：优先查本批共享的目录缓存（避免逐文件全表查询），
+/// 未命中时向上补建缺失的目录链（确定性 id），并把结果回写缓存。
+fn resolve_folder_id(
+    db: &Database,
+    path: &Path,
+    folder_cache: &mut HashMap<String, String>,
+) -> Result<String, String> {
     let parent = path
         .parent()
         .map(|p| p.to_string_lossy().to_string())
@@ -517,14 +581,14 @@ fn resolve_folder_id(db: &Database, path: &Path) -> Result<String, String> {
         return Ok(String::new());
     }
     let parent_norm = norm_path(&parent);
-    // 库内精确匹配父目录
-    if let Ok(folders) = db.get_folders() {
-        if let Some(f) = folders.iter().find(|f| norm_path(&f.path) == parent_norm) {
-            return Ok(f.id.clone());
-        }
+    // 缓存命中：直接复用（大目录拖入时绝大多数文件都命中此路径）
+    if let Some(id) = folder_cache.get(&parent_norm) {
+        return Ok(id.clone());
     }
-    // 父目录不存在 → 补建目录链
-    ensure_dir_chain(db, Path::new(&parent))
+    // 未命中：补建/查找目录链，并回填缓存供本批后续文件复用
+    let id = ensure_dir_chain(db, Path::new(&parent))?;
+    folder_cache.insert(parent_norm, id.clone());
+    Ok(id)
 }
 
 /// 自下而上补建缺失的目录链，返回最底层目录（叶）的 folder id。
@@ -658,6 +722,12 @@ pub fn backfill_existing_assets(
     let mut skipped_existing = 0usize;
     let mut skipped_other = 0usize;
 
+    // 目录 路径→id 缓存：补齐索引通常涉及大量文件，避免逐文件全表查询目录
+    let mut folder_cache: HashMap<String, String> = db
+        .get_folders()
+        .map(|fs| fs.iter().map(|f| (norm_path(&f.path), f.id.clone())).collect())
+        .unwrap_or_default();
+
     let total_files = files.len();
     for file_path in &files {
         let path_str = file_path.to_string_lossy().to_string();
@@ -675,7 +745,7 @@ pub fn backfill_existing_assets(
         }
 
         let mut asset = create_asset_from_path(file_path)?;
-        asset.folder_id = resolve_folder_id(db, file_path)?;
+        asset.folder_id = resolve_folder_id(db, file_path, &mut folder_cache)?;
         new_assets.push(asset);
     }
 

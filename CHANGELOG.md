@@ -36,3 +36,30 @@
 
 ### 说明
 - 本次为后端重构主体 + 前端目录树实时事件。后续可继续优化前端状态合并粒度、大目录拖入的节流策略。
+
+---
+
+## v0.1.1 (2026-09-08) — 修改联动元数据重读 + 大目录拖入批量入库
+
+### 背景
+- v0.1.0 的快速通道在文件内容被修改时只更新 mtime/size，图片宽高与哈希停留在旧值，详情面板数据与磁盘脱节。
+- 逐文件入库路径存在 N 次 `get_folders()` 全表查询 + 单条 SAVE，超大目录拖入时数据库往返过多。
+
+### 变更内容
+1. **修改事件联动重读元数据**（`watcher.rs` `handle_file_modified`）：
+   - 图片类资产：重新提取 width/height（`metadata_extractor::extract_metadata`）。
+   - 哈希：体积 ≤ 阈值（图片 2MB / 其他 1MB，与 sync.rs 对账口径一致）时重算 SHA-256；大文件跳过全量读盘、保留旧值。
+   - 新增 `database.rs` `update_asset_signature`：单语句更新 date_modified/size/width/height/file_hash，替代原先两次 `update_asset_field` 往返。
+2. **批量新增 + 目录缓存**（`watcher.rs`）：
+   - `flush_events` 一次 `get_folders()` 同时构建 路径→id 缓存，本批所有新增文件共享，消除逐文件全表查询。
+   - `handle_file_added`（逐文件）改为 `handle_file_additions`（批量）：内存构建全部资产 → `batch_save_assets` 单事务入库 → 统一广播事件。
+   - `resolve_folder_id` 改为缓存优先（命中直取，未命中走 `ensure_dir_chain` 并回填缓存）；`backfill_existing_assets` 同样接入缓存。
+3. **死代码清理**：删除已无引用的 `update_asset_field`、`get_folders_under`。
+
+### 效果
+- 文件内容修改后，详情面板的尺寸/哈希随磁盘实时准确。
+- 拖入 1000 文件级别的目录时：目录解析从 1000 次全表查询降为 1 次，入库从 1000 个独立写事务降为 1 个批量事务；事件侧原有 300ms 微批 + 前端 50ms 合并保持不变。
+
+### 变更文件
+- `src-tauri/src/database.rs`：新增 `update_asset_signature`；删除 `update_asset_field` / `get_folders_under`。
+- `src-tauri/src/watcher.rs`：`handle_file_modified` 联动重读；`handle_file_additions` 批量入库；`resolve_folder_id` 缓存化；`backfill_existing_assets` 接缓存。
