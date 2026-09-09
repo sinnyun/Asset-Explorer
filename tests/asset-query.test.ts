@@ -4,6 +4,7 @@ import { assetDisplayGroupKey, normalizeAssetQuery, stableAssetQueryKey } from '
 import { AssetPageCache } from '../src/services/api/assetQueryCache';
 import type { AssetSummary } from '../src/types';
 import { readFileSync } from 'node:fs';
+import { ThumbnailMemoryCache } from '../src/services/thumbnailMemoryCache';
 
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({
@@ -79,4 +80,29 @@ test('assets without a loaded folder share one stable display group', () => {
   const first = assetDisplayGroupKey({ folderId: undefined, path: 'D:/assets/a.png' });
   const second = assetDisplayGroupKey({ folderId: undefined, path: 'D:/assets/b.png' });
   assert.equal(first, second);
+});
+
+test('asset preview never requests a whole-file base64 payload', () => {
+  const source = readFileSync(new URL('../src/components/preview/assetPreviewSource.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /read_file_base64/);
+  assert.doesNotMatch(source, /readLocalFileAsDataUrl/);
+  assert.match(source, /convertFileSrc/);
+});
+
+test('thumbnail memory cache is LRU bounded and releases evicted urls', () => {
+  const released: string[] = [];
+  const cache = new ThumbnailMemoryCache(2, url => released.push(url));
+  cache.set('a', 'blob:a');
+  cache.set('b', 'blob:b');
+  assert.equal(cache.get('a'), 'blob:a');
+  cache.set('c', 'blob:c');
+  assert.equal(cache.size, 2);
+  assert.equal(cache.get('b'), undefined);
+  assert.deepEqual(released, ['blob:b']);
+});
+
+test('thumbnail component requests work only near the viewport', () => {
+  const source = readFileSync(new URL('../src/components/ThumbnailImage.tsx', import.meta.url), 'utf8');
+  assert.match(source, /IntersectionObserver/);
+  assert.match(source, /rootMargin/);
 });

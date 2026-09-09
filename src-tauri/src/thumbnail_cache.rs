@@ -25,12 +25,20 @@ pub fn get_cache_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// 计算缓存唯一文件路径 (根据文件源路径哈希与目标尺寸)
-pub fn get_cache_file_path(source_path: &Path, max_dimension: u32, data_dir: &Path) -> PathBuf {
+pub fn get_cache_file_path(source_path: &Path, max_dimension: u32, data_dir: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::metadata(source_path)
+        .map_err(|error| format!("读取缩略图源文件属性失败: {error}"))?;
+    let modified_ns = metadata.modified().ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(source_path.to_string_lossy().as_bytes());
+    hasher.update(metadata.len().to_le_bytes());
+    hasher.update(modified_ns.to_le_bytes());
     let hash_hex = hex::encode(hasher.finalize());
-    let filename = format!("{}_{}px.png", &hash_hex[..16], max_dimension);
-    get_cache_dir(data_dir).join(filename)
+    let filename = format!("{}_{}px.png", &hash_hex[..16], max_dimension.clamp(32, 1024));
+    Ok(get_cache_dir(data_dir).join(filename))
 }
 
 /// 核心接口：获取或提取缩略图
@@ -40,7 +48,8 @@ pub fn generate_or_get_thumbnail(source_path: &Path, max_dimension: u32, data_di
         return Err(format!("源文件不存在: {:?}", source_path));
     }
 
-    let target_cache_path = get_cache_file_path(source_path, max_dimension, data_dir);
+    let max_dimension = max_dimension.clamp(32, 1024);
+    let target_cache_path = get_cache_file_path(source_path, max_dimension, data_dir)?;
     if target_cache_path.exists() {
         return Ok(target_cache_path);
     }
@@ -63,12 +72,33 @@ pub fn generate_or_get_thumbnail(source_path: &Path, max_dimension: u32, data_di
 
 /// 使用 Rust image 开源库解码并缩放保存
 fn extract_via_image_crate(source_path: &Path, max_dimension: u32, target_cache_path: &Path) -> Result<PathBuf, String> {
-    let img = image::open(source_path).map_err(|e| format!("Rust image 解码失败: {}", e))?;
+    let reader = image::ImageReader::open(source_path)
+        .map_err(|e| format!("打开图片失败: {e}"))?
+        .with_guessed_format()
+        .map_err(|e| format!("识别图片格式失败: {e}"))?;
+    let (width, height) = reader.into_dimensions()
+        .map_err(|e| format!("读取图片尺寸失败: {e}"))?;
+    validate_image_dimensions(width, height)?;
+    let img = image::ImageReader::open(source_path)
+        .map_err(|e| format!("打开图片失败: {e}"))?
+        .with_guessed_format()
+        .map_err(|e| format!("识别图片格式失败: {e}"))?
+        .decode()
+        .map_err(|e| format!("Rust image 解码失败: {e}"))?;
     let thumbnail = img.thumbnail(max_dimension, max_dimension);
     thumbnail
         .save(target_cache_path)
         .map_err(|e| format!("保存缩略图至磁盘失败: {}", e))?;
     Ok(target_cache_path.to_path_buf())
+}
+
+pub fn validate_image_dimensions(width: u32, height: u32) -> Result<(), String> {
+    const MAX_PIXELS: u64 = 100_000_000;
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if width == 0 || height == 0 || pixels > MAX_PIXELS {
+        return Err(format!("图片声明尺寸不安全: {width}x{height}"));
+    }
+    Ok(())
 }
 
 // ============================================================================

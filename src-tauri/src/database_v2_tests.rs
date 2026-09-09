@@ -1036,3 +1036,38 @@ fn subtree_scan_does_not_register_the_subdirectory_as_a_monitored_root() {
     assert!(folder.id.starts_with("f_"));
     assert!(!folder.id.starts_with("f_root_"));
 }
+
+#[test]
+fn generic_whole_file_base64_command_is_not_registered() {
+    let main = include_str!("main.rs");
+    assert!(!main.contains("read_file_base64,"));
+}
+
+#[test]
+fn thumbnail_cache_key_changes_with_source_version() {
+    let dir = TestDir::new("thumbnail-version");
+    let source = dir.join("source.png");
+    std::fs::write(&source, b"one").unwrap();
+    let first = crate::thumbnail_cache::get_cache_file_path(&source, 256, &dir.0).unwrap();
+    std::fs::write(&source, b"a longer source version").unwrap();
+    let second = crate::thumbnail_cache::get_cache_file_path(&source, 256, &dir.0).unwrap();
+    assert_ne!(first, second);
+}
+
+#[test]
+fn thumbnail_decoder_rejects_excessive_declared_pixels() {
+    assert!(crate::thumbnail_cache::validate_image_dimensions(10_000, 10_000).is_ok());
+    assert!(crate::thumbnail_cache::validate_image_dimensions(10_001, 10_000).is_err());
+}
+
+#[test]
+fn thumbnail_queue_refuses_work_above_its_hard_limit() {
+    let coordinator = crate::thumbnail_jobs::ThumbnailCoordinator::new(2, 512);
+    let reservations = (0..512)
+        .map(|_| coordinator.reserve().expect("within thumbnail queue capacity"))
+        .collect::<Vec<_>>();
+    assert!(coordinator.reserve().is_err());
+    assert_eq!(coordinator.queued(), 512);
+    drop(reservations);
+    assert_eq!(coordinator.queued(), 0);
+}

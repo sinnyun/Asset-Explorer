@@ -12,6 +12,7 @@ mod metadata_extractor;
 mod models;
 mod sync;
 mod thumbnail_cache;
+mod thumbnail_jobs;
 mod watcher;
 
 #[cfg(test)]
@@ -20,6 +21,7 @@ mod database_v2_tests;
 use commands::*;
 use database::Database;
 use index_jobs::IndexCoordinator;
+use thumbnail_jobs::ThumbnailCoordinator;
 use std::sync::Arc;
 use tauri::Manager;
 use watcher::WatcherRegistry;
@@ -55,6 +57,7 @@ fn main() {
         }))
         .manage(db.clone())
         .manage(index_coordinator)
+        .manage(ThumbnailCoordinator::new(2, 512))
         // Startup only opens storage and registers watchers. Expensive filesystem
         // maintenance is always an explicit, cancellable job.
         .setup(move |app| {
@@ -136,7 +139,6 @@ fn main() {
             restart_application,
             validate_assets,
             read_thumbnail_base64,
-            read_file_base64,
             file_exists,
             reconcile_monitored_folders
         ])

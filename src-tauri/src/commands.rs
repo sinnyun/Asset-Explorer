@@ -15,6 +15,7 @@ use crate::models::{
     FolderPage, FolderQuery, ScanResult, SmartFolder, Tag, WorkspaceShell,
 };
 use crate::thumbnail_cache::generate_or_get_thumbnail;
+use crate::thumbnail_jobs::ThumbnailCoordinator;
 use crate::sync::FolderChangeEvent;
 use crate::watcher::{backfill_existing_assets, WatcherRegistry};
 use serde::{Deserialize, Serialize};
@@ -586,9 +587,17 @@ pub async fn get_file_metadata(path: String) -> Result<serde_json::Value, String
 
 /// 指令 18: 生成或获取图片缩略图，生成后自动保存缩略图路径到数据库
 #[tauri::command]
-pub async fn get_thumbnail(db: State<'_, Database>, asset_id: String, path: String, max_dimension: u32) -> Result<String, String> {
+pub async fn get_thumbnail(
+    db: State<'_, Database>,
+    coordinator: State<'_, ThumbnailCoordinator>,
+    asset_id: String,
+    path: String,
+    max_dimension: u32,
+) -> Result<String, String> {
     let db = db.inner().clone();
-    tokio::task::spawn_blocking(move || {
+    let reservation = coordinator.reserve()?;
+    let permit = reservation.acquire().await?;
+    let result = tokio::task::spawn_blocking(move || {
         let p = Path::new(&path);
         // 使用数据库的 data_dir 作为缩略图缓存根目录（与数据库同目录下的 thumbnails/）
         let data_dir = db.get_data_dir().to_path_buf();
@@ -599,7 +608,10 @@ pub async fn get_thumbnail(db: State<'_, Database>, asset_id: String, path: Stri
         Ok(thumb_str)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    drop(permit);
+    drop(reservation);
+    result
 }
 
 /// 指令 19: 在系统文件管理器中高亮定位文件
@@ -701,45 +713,6 @@ pub async fn read_thumbnail_base64(file_path: String) -> Result<String, String> 
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-/// 指令 26: 读取任意文件并以 base64 data URL 返回（用于文件预览）
-/// 与 read_thumbnail_base64 类似，但面向源文件而非缩略图缓存。
-/// 设定了 50MB 大小上限（原为 200MB，过高会占用 ~270MB 内存且造成严重 GC 压力），
-/// 超出部分由前端回退到缩略图或 asset:// URL 方式加载。
-/// 使用 tokio::task::spawn_blocking 避免大文件读取阻塞 Tauri 主线程。
-#[tauri::command]
-pub async fn read_file_base64(file_path: String) -> Result<String, String> {
-    const MAX_PREVIEW_BYTES: u64 = 50 * 1024 * 1024; // 50MB（过高会占用 ~270MB 内存，且造成大量 GC 压力）
-
-    let path_clone = file_path.clone();
-    tokio::task::spawn_blocking(move || {
-        let path = std::path::Path::new(&path_clone);
-        if !path.exists() {
-            return Err(format!("文件不存在: {}", path_clone));
-        }
-
-        // 检查文件大小，防止读取超大文件到内存
-        let meta = std::fs::metadata(path).map_err(|e| format!("读取文件元信息失败: {}", e))?;
-        if meta.len() > MAX_PREVIEW_BYTES {
-            return Err(format!("文件过大({} bytes)，超出预览限制", meta.len()));
-        }
-
-        let bytes = std::fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-
-        // 使用 mime_guess 根据扩展名推断 MIME 类型
-        let mime = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(|ext| mime_guess::from_ext(ext).first())
-            .map(|m| m.essence_str().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        Ok(format!("data:{};base64,{}", mime, b64))
-    })
-    .await
-    .map_err(|e| format!("后台线程执行失败: {}", e))?
 }
 
 /// 指令 27: 轻量检查本地文件是否存在
