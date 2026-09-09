@@ -70,19 +70,19 @@ fn main() {
                 }
             }
 
-            // 后台周期对账兜底：每 60s 以廉价剪枝模式对全部已监控根做一次对账，
-            // 纠正 notify 事件可能存在的漏检（结构变化必定冒泡到目录 mtime，能被剪枝路径捕获）。
+            // 后台周期对账兜底：每 5s 对全部已监控根目录做一次实时递归对账，
+            // 纠正外部工具批量写入或 notify 事件队列可能存在的漏检。
             let per_app = app_handle.clone();
             let per_db = db_for_setup.clone();
             std::thread::spawn(move || {
                 use crate::sync::{reconcile_root, ReconcileMode};
                 loop {
-                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    std::thread::sleep(std::time::Duration::from_secs(5));
                     if let Ok(folders) = per_db.get_monitored_folders() {
                         for f in &folders {
                             let p = std::path::Path::new(&f.path);
-                            if p.exists() {
-                                let _ = reconcile_root(&per_app, &per_db, p, ReconcileMode::Pruned);
+                            if p.exists() && p.is_dir() {
+                                let _ = reconcile_root(&per_app, &per_db, p, ReconcileMode::Deep);
                             }
                         }
                     }

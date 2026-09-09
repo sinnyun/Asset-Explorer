@@ -475,10 +475,10 @@ export function MainArea({
                             isAssetSelected ? "bg-blue-500/10 border-blue-500/30" : "hover:bg-white/5"
                           )}
                         >
-                          <div className="w-8 h-8 flex items-center justify-center shrink-0 rounded overflow-hidden bg-[#111]">
+                          <div className="w-8 h-8 flex items-center justify-center shrink-0 rounded overflow-hidden bg-black">
                             <ThumbnailImage
                               asset={asset}
-                              className="w-full h-full object-cover"
+                              className="w-full h-full object-contain"
                               fallbackIcon={getAssetIcon(asset.type)}
                             />
                           </div>
@@ -545,7 +545,7 @@ export function MainArea({
                             : "border-neutral-800 hover:border-neutral-600 hover:bg-[#252525]"
                         )}
                       >
-                        <div className="aspect-square bg-[#111] relative flex items-center justify-center overflow-hidden">
+                        <div className="aspect-square bg-black relative flex items-center justify-center overflow-hidden">
                           {/* Top Right File Format */}
                           <div className="absolute top-2 right-2 z-10 bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded text-[10px] font-bold text-white/90 uppercase tracking-wider">
                             {asset.type}
@@ -554,7 +554,7 @@ export function MainArea({
                           {/* 缩略图懒加载：通过 ThumbnailImage 组件高效渲染，支持内存缓存与优雅降级 */}
                           <ThumbnailImage
                             asset={asset}
-                            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                            className="w-full h-full object-contain transition-transform duration-300 group-hover:scale-105"
                             fallbackIcon={
                               <div className="transform transition-transform duration-300 group-hover:scale-110">
                                 {getAssetIcon(asset.type)}

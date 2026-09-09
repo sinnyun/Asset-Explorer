@@ -218,6 +218,11 @@ class WebApiProvider implements ApiProvider {
     // No-op in Web mode
   }
 
+  /** Web 模式无需本地对账 */
+  async reconcileMonitoredFolders(): Promise<any> {
+    return { folders_added: 0, folders_removed: 0, folders_updated: 0, assets_added: 0, assets_removed: 0, assets_updated: 0 };
+  }
+
   // ------------------------------------------------------------------------
   // 资产操作
   // ------------------------------------------------------------------------

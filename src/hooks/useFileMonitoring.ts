@@ -22,9 +22,13 @@ interface FolderMonitoringPayload {
     path: string;
     parentId?: string | null;
     isMonitored?: boolean;
+    mtime?: string | null;
   };
   action?: string; // "added" | "updated" | "removed"
 }
+
+/** 标准化路径以便稳定对比（全部反斜杠，去末尾分隔符，小写） */
+const cleanPath = (p: string) => p.trim().replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 
 /** 将后端文件夹载荷映射为前端 Folder 状态（补齐 tags/collections 等前端默认字段） */
 const toFrontendFolder = (f: NonNullable<FolderMonitoringPayload['folder']>): Folder => ({
@@ -37,24 +41,22 @@ const toFrontendFolder = (f: NonNullable<FolderMonitoringPayload['folder']>): Fo
   collections: [],
 });
 
-/** 判断子路径是否位于某文件夹路径（含分隔符，避免前缀误匹配） */
+/** 判断子路径是否位于某文件夹路径（兼容反斜杠/正斜杠与大小写） */
 const isUnderFolder = (childPath: string, folderPath: string): boolean => {
-  if (childPath === folderPath) return true;
-  const c = childPath.toLowerCase();
-  const f = folderPath.toLowerCase();
-  return c.startsWith(`${f}/`) || c.startsWith(`${f}\\`);
+  const c = cleanPath(childPath);
+  const f = cleanPath(folderPath);
+  if (c === f) return true;
+  return c.startsWith(`${f}\\`) || c.startsWith(`${f}/`);
 };
 
 /**
- * 桌面模式：监听文件监控器实时事件（资产新增/删除/修改）
+ * 桌面模式：监听文件监控器实时事件（资产新增/删除/修改、文件夹增删改）
  *
- * 性能优化策略：
- * 1. 强类型载荷定义：消除 TypeScript TS2339 错误。
- * 2. 事件微批处理（Micro-batching）：
- *    大批量文件生成/删除（如拖入包含上百文件的目录）时，Rust watcher 会在数毫秒内发出大量事件。
- *    若每次事件均同步执行 setState 与数组拷贝，会严重阻塞 UI 渲染主线程。
- *    采用 50ms 缓冲队列，将多个事件合并为单次 setState 批量更新，确保 UI 保持 60fps 流畅。
- * 3. 增量合并：无需每次全量重新请求 loadWorkspace，直接在本地状态中增/删/改。
+ * 核心保障：
+ * 1. 强类型载荷与路径归一化对比，彻底避免 Windows 路径大小写和斜杠导致的过滤失配。
+ * 2. 事件微批处理（Micro-batching）：50ms 缓冲队列合并高频事件，保护 UI 60fps 流畅。
+ * 3. 文件夹联动资产：文件夹被删除时，文件夹节点与整棵子孙树资产联动移除。
+ * 4. 窗口聚焦自动触发增量对账：切屏修改文件切回时，毫秒级主动对账并更新视图。
  */
 export function useFileMonitoring(
   setState: React.Dispatch<React.SetStateAction<AssetState>>
@@ -100,15 +102,19 @@ export function useFileMonitoring(
         return;
       }
 
+      const normRemovePaths = new Set(Array.from(removePaths).map(cleanPath));
+
       setState(prev => {
         let nextAssets = prev.assets;
 
-        // 1. 先执行删除过滤（O(N) 单次扫描）
-        if (removeIds.size > 0 || removePaths.size > 0) {
-          nextAssets = nextAssets.filter(a => !removeIds.has(a.id) && !removePaths.has(a.path));
+        // 1. 先执行删除过滤（支持 ID 与归一化绝对路径匹配）
+        if (removeIds.size > 0 || normRemovePaths.size > 0) {
+          nextAssets = nextAssets.filter(
+            a => !removeIds.has(a.id) && !removePaths.has(a.path) && !normRemovePaths.has(cleanPath(a.path))
+          );
         }
 
-        // 2. 执行修改（O(N) 单次扫描）
+        // 2. 执行修改（原位精准更新）
         if (modifies.size > 0) {
           nextAssets = nextAssets.map(a => {
             const updated = modifies.get(a.id);
@@ -116,21 +122,33 @@ export function useFileMonitoring(
           });
         }
 
-        // 3. 执行新增（按 id 去重后首部插入）
+        // 3. 执行新增（已存在原位更新，不存在则首部插入）
         if (adds.length > 0) {
-          const existingIds = new Set(nextAssets.map(a => a.id));
-          // adds 内部也做去重，防止多路事件源对同一文件重复上报产生同 id 资产
-          const seenInAdds = new Set<string>();
-          const uniqueAdds = adds.filter(a => {
-            if (existingIds.has(a.id) || seenInAdds.has(a.id)) return false;
-            seenInAdds.add(a.id);
-            return true;
-          });
-          nextAssets = [...uniqueAdds, ...nextAssets];
+          const existingMap = new Map<string, number>(nextAssets.map((a, idx) => [a.id, idx]));
+          const brandNew: Asset[] = [];
+
+          for (const newA of adds) {
+            const existingIdx = existingMap.get(newA.id);
+            if (existingIdx !== undefined && typeof existingIdx === 'number') {
+              nextAssets[existingIdx] = { ...nextAssets[existingIdx], ...newA };
+            } else {
+              brandNew.push(newA);
+            }
+          }
+
+          if (brandNew.length > 0) {
+            // brandNew 内部也去重
+            const seenInBrandNew = new Set<string>();
+            const uniqueBrandNew = brandNew.filter(a => {
+              if (seenInBrandNew.has(a.id)) return false;
+              seenInBrandNew.add(a.id);
+              return true;
+            });
+            nextAssets = [...uniqueBrandNew, ...nextAssets];
+          }
         }
 
-        // 4. 兜底去重：确保整个 assets 数组中 id 全局唯一（防御由于外部事件/并发
-        //    setState 累积导致的任何历史脏数据，杜绝 React 渲染 key 冲突）
+        // 4. 兜底去重：确保整个 assets 数组中 id 全局唯一
         const seenAll = new Set<string>();
         const uniqueAll: typeof nextAssets = [];
         for (const a of nextAssets) {
@@ -214,29 +232,33 @@ export function useFileMonitoring(
           }
         });
 
-        // 文件夹新增：目录树实时上屏（按 id 去重，避免重复渲染）
+        // 文件夹新增：目录树实时上屏（按 id 与规整路径双重去重）
         const unlistenFolderAdd = await listen<FolderMonitoringPayload>('folder:added', (ev) => {
           const folder = ev.payload?.folder;
           console.log('[Monitor][前端] 收到 folder:added:', folder?.path ?? '(空)');
           if (!folder?.id) return;
+          const newF = toFrontendFolder(folder);
+          const newNorm = cleanPath(newF.path);
           setState(prev => {
-            if (prev.folders.some(f => f.id === folder.id)) return prev;
-            return { ...prev, folders: [...prev.folders, toFrontendFolder(folder)] };
+            if (prev.folders.some(f => f.id === newF.id || cleanPath(f.path) === newNorm)) return prev;
+            return { ...prev, folders: [...prev.folders, newF] };
           });
         });
 
-        // 文件夹更新：按 id 原位替换
+        // 文件夹更新：按 id / 路径原位替换
         const unlistenFolderUpdate = await listen<FolderMonitoringPayload>('folder:updated', (ev) => {
           const folder = ev.payload?.folder;
           console.log('[Monitor][前端] 收到 folder:updated:', folder?.path ?? '(空)');
           if (!folder?.id) return;
+          const updatedF = toFrontendFolder(folder);
+          const updatedNorm = cleanPath(updatedF.path);
           setState(prev => ({
             ...prev,
-            folders: prev.folders.map(f => (f.id === folder.id ? toFrontendFolder(folder) : f)),
+            folders: prev.folders.map(f => (f.id === updatedF.id || cleanPath(f.path) === updatedNorm ? { ...f, ...updatedF } : f)),
           }));
         });
 
-        // 文件夹删除：移除该文件夹及其整棵子孙树（按路径前缀，后端为级联删除）
+        // 文件夹删除：移除该文件夹及其整棵子孙树，同时移除其中的全部资产
         const unlistenFolderRemove = await listen<FolderMonitoringPayload>('folder:removed', (ev) => {
           const folder = ev.payload?.folder;
           console.log('[Monitor][前端] 收到 folder:removed:', folder?.path ?? '(空)');
@@ -245,6 +267,7 @@ export function useFileMonitoring(
           setState(prev => ({
             ...prev,
             folders: prev.folders.filter(f => f.id !== folder.id && !isUnderFolder(f.path, path)),
+            assets: prev.assets.filter(a => a.folderId !== folder.id && !isUnderFolder(a.path, path)),
           }));
         });
 
@@ -263,7 +286,16 @@ export function useFileMonitoring(
 
     setupListeners();
 
+    // 当用户切屏回到应用时，自动触发一次增量对账，确保切屏期间的文件改动立即同步
+    const handleFocus = () => {
+      import('../services/dataService').then(({ dataService }) => {
+        dataService.reconcileMonitoredFolders();
+      });
+    };
+    window.addEventListener('focus', handleFocus);
+
     return () => {
+      window.removeEventListener('focus', handleFocus);
       if (batchTimerRef.current) {
         clearTimeout(batchTimerRef.current);
         batchTimerRef.current = null;

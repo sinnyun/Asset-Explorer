@@ -82,10 +82,10 @@ export function AssetPreviewToggle({ asset }: AssetPreviewToggleProps) {
 
       {/* 内容区 */}
       {mode === 'thumbnail' ? (
-        <div className="w-full aspect-video flex items-center justify-center">
+        <div className="w-full aspect-video bg-black flex items-center justify-center overflow-hidden">
           <ThumbnailImage
             asset={asset}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-contain"
             fallbackIcon={<ImageIcon size={48} className="text-neutral-700" />}
             loading="eager"
           />

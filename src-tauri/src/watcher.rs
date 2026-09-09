@@ -296,6 +296,19 @@ fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
         }
     }
 
+    // 兜底对账：触发本批事件涉及的监控根目录后台对账，确保多级嵌套和级联状态完美同步
+    if let Ok(monitored) = db.get_monitored_folders() {
+        for m in monitored {
+            let m_path = m.path.clone();
+            let touched = events.iter().any(|ev| {
+                ev.paths.iter().any(|p| crate::sync::is_path_under(&p.to_string_lossy(), &m_path))
+            });
+            if touched {
+                trigger_reconcile(app_handle, db, PathBuf::from(m_path));
+            }
+        }
+    }
+
     // 调试汇总：每批事件处理完后打印本批分类统计，便于确认"事件是否被正确感知与落库"
     println!(
         "[Watcher] 事件批处理完成: 原始事件 {} 个, 待新增 {} 个, 待删除 {} 个, 待修改 {} 个, 目录对账 {} 个",
@@ -307,12 +320,22 @@ fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
     );
 }
 
-/// 触发一次后台子树对账（Deep）：新建/重命名/移动目录后使用，确保目录树+嵌套资产正确。
+/// 触发一次后台子树对账（Deep）：定位其所属的根监视目录进行全量对账，确保目录树+嵌套资产完全正确。
 fn trigger_reconcile(app_handle: &AppHandle, db: &Database, dir: PathBuf) {
     let app = app_handle.clone();
     let dbc = Arc::<Database>::new(db.clone());
     std::thread::spawn(move || {
-        let _ = reconcile_root(&app, dbc.as_ref(), &dir, ReconcileMode::Deep);
+        let root = if let Ok(monitored) = dbc.get_monitored_folders() {
+            let dir_str = dir.to_string_lossy().to_string();
+            monitored
+                .into_iter()
+                .find(|m| crate::sync::is_path_under(&dir_str, &m.path))
+                .map(|m| PathBuf::from(m.path))
+                .unwrap_or(dir)
+        } else {
+            dir
+        };
+        let _ = reconcile_root(&app, dbc.as_ref(), &root, ReconcileMode::Deep);
     });
 }
 
@@ -468,7 +491,7 @@ fn handle_file_additions(
             continue;
         }
         let mut asset = create_asset_from_path(path)?;
-        asset.folder_id = resolve_folder_id(db, path, folder_cache)?;
+        asset.folder_id = resolve_folder_id(app_handle, db, path, folder_cache)?;
         new_assets.push(asset);
     }
 
@@ -553,6 +576,7 @@ fn handle_file_modified(app_handle: &AppHandle, db: &Database, path: &Path) -> R
 /// 解析文件所属文件夹 id：优先查本批共享的目录缓存（避免逐文件全表查询），
 /// 未命中时向上补建缺失的目录链（确定性 id），并把结果回写缓存。
 fn resolve_folder_id(
+    app_handle: &AppHandle,
     db: &Database,
     path: &Path,
     folder_cache: &mut HashMap<String, String>,
@@ -570,13 +594,13 @@ fn resolve_folder_id(
         return Ok(id.clone());
     }
     // 未命中：补建/查找目录链，并回填缓存供本批后续文件复用
-    let id = ensure_dir_chain(db, Path::new(&parent))?;
+    let id = ensure_dir_chain(app_handle, db, Path::new(&parent))?;
     folder_cache.insert(parent_norm, id.clone());
     Ok(id)
 }
 
 /// 自下而上补建缺失的目录链，返回最底层目录（叶）的 folder id。
-fn ensure_dir_chain(db: &Database, dir: &Path) -> Result<String, String> {
+fn ensure_dir_chain(app_handle: &AppHandle, db: &Database, dir: &Path) -> Result<String, String> {
     let dir_str = dir.to_string_lossy().to_string();
     let dir_norm = norm_path(&dir_str);
     // 已存在则直接返回
@@ -589,7 +613,7 @@ fn ensure_dir_chain(db: &Database, dir: &Path) -> Result<String, String> {
     // 递归保证父目录存在
     let parent_id = match dir.parent() {
         Some(p) if !p.as_os_str().is_empty() && norm_path(&p.to_string_lossy()) != dir_norm => {
-            Some(ensure_dir_chain(db, p)?)
+            Some(ensure_dir_chain(app_handle, db, p)?)
         }
         _ => None,
     };
@@ -609,6 +633,10 @@ fn ensure_dir_chain(db: &Database, dir: &Path) -> Result<String, String> {
         mtime: None,
     };
     db.upsert_folder(&folder)?;
+    let _ = app_handle.emit("folder:added", FolderChangeEvent {
+        folder: folder.clone(),
+        action: "added".to_string(),
+    });
     Ok(folder.id)
 }
 

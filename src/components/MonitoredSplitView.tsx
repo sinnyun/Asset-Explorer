@@ -332,10 +332,10 @@ export function MonitoredSplitView({
                           isSelected ? "border-blue-500 ring-1 ring-blue-500/50 bg-blue-500/5" : "border-neutral-800"
                         )}
                       >
-                        <div className="w-full aspect-video bg-[#1e1e1e] rounded flex items-center justify-center overflow-hidden mb-1.5 relative">
+                        <div className="w-full aspect-video bg-black rounded flex items-center justify-center overflow-hidden mb-1.5 relative">
                           <ThumbnailImage
                             asset={asset}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                            className="w-full h-full object-contain group-hover:scale-105 transition-transform"
                             fallbackIcon={getAssetIcon(asset.type)}
                           />
                           <span className="absolute bottom-1 right-1 text-[9px] font-mono px-1 py-0.2 rounded bg-black/70 text-neutral-300">
@@ -456,10 +456,10 @@ export function MonitoredSplitView({
                           isSelected ? "border-purple-500 ring-1 ring-purple-500/50 bg-purple-500/5" : "border-neutral-800"
                         )}
                       >
-                        <div className="w-full aspect-video bg-[#1e1e1e] rounded flex items-center justify-center overflow-hidden mb-1.5 relative">
+                        <div className="w-full aspect-video bg-black rounded flex items-center justify-center overflow-hidden mb-1.5 relative">
                           <ThumbnailImage
                             asset={asset}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                            className="w-full h-full object-contain group-hover:scale-105 transition-transform"
                             fallbackIcon={getAssetIcon(asset.type)}
                           />
                           <span className="absolute bottom-1 right-1 text-[9px] font-mono px-1 py-0.2 rounded bg-black/70 text-neutral-300">

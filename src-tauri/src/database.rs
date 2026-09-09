@@ -1060,14 +1060,33 @@ impl Database {
         Ok(folders)
     }
 
-    /// 按路径批量删除资产（用于文件监控检测到删除时）
+    /// 按路径批量删除资产（用于文件监控检测到删除时，兼容斜杠与大小写差异）
     pub fn delete_assets_by_paths(&self, paths: &[String]) -> Result<usize, String> {
         let conn = self.conn.lock();
         let mut count = 0usize;
         for path in paths {
+            let p_raw = path.trim();
+            let p_bs = p_raw.replace('/', "\\");
+            let p_norm = p_bs.to_lowercase();
             let affected = conn
-                .execute("DELETE FROM assets WHERE path = ?1", params![path])
+                .execute(
+                    "DELETE FROM assets WHERE path = ?1 OR path = ?2 OR lower(replace(path, '/', '\\')) = ?3",
+                    params![p_raw, p_bs, p_norm],
+                )
                 .map_err(|e| e.to_string())?;
+            count += affected;
+        }
+        Ok(count)
+    }
+
+    /// 按 ID 批量删除资产（主键删除，最精确且不受路径格式影响）
+    pub fn delete_assets_by_ids(&self, ids: &[String]) -> Result<usize, String> {
+        let conn = self.conn.lock();
+        let mut count = 0usize;
+        for id in ids {
+            let affected = conn
+                .execute("DELETE FROM assets WHERE id = ?1", params![id])
+                .unwrap_or(0);
             count += affected;
         }
         Ok(count)
@@ -1102,19 +1121,24 @@ impl Database {
         Ok((total, deleted))
     }
 
-    /// 按路径查询资产（判断文件是否已在数据库中）
+    /// 按路径查询资产（判断文件是否已在数据库中，兼容斜杠与大小写差异）
     pub fn get_asset_by_path(&self, path: &str) -> Result<Option<Asset>, String> {
         let conn = self.conn.lock();
+        let p_raw = path.trim();
+        let p_bs = p_raw.replace('/', "\\");
+        let p_norm = p_bs.to_lowercase();
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, path, asset_type, size, folder_id, date_modified, date_added,
                         rating, favorite, color, width, height, file_hash, thumbnail_url
-                 FROM assets WHERE path = ?1 LIMIT 1",
+                 FROM assets 
+                 WHERE path = ?1 OR path = ?2 OR lower(replace(path, '/', '\\')) = ?3 
+                 LIMIT 1",
             )
             .map_err(|e| e.to_string())?;
 
         let mut rows = stmt
-            .query_map(params![path], |row| {
+            .query_map(params![p_raw, p_bs, p_norm], |row| {
                 Ok(Asset {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -1233,26 +1257,27 @@ impl Database {
         Ok(())
     }
 
-    /// 轻量读取某根目录下全部资产的签名 (path, date_modified, size)，
+    /// 轻量读取某根目录下全部资产的签名 (id, path, date_modified, size)，
     /// 供对账与库内现状比对，避免携带 tags/collections 的额外开销。
-    pub fn get_asset_signatures_under(&self, root_path: &str) -> Result<Vec<(String, String, i64)>, String> {
+    pub fn get_asset_signatures_under(&self, root_path: &str) -> Result<Vec<(String, String, String, i64)>, String> {
         let root = normalize_root(root_path);
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT path, date_modified, size FROM assets")
+            .prepare("SELECT id, path, date_modified, size FROM assets")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for r in rows.flatten() {
-            if is_path_under(&r.0, &root) {
+            if is_path_under(&r.1, &root) {
                 out.push(r);
             }
         }

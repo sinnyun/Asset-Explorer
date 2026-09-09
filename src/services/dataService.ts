@@ -81,6 +81,13 @@ class DataService {
     await apiClient.validateAssets();
   }
 
+  /** 对全部监视文件夹执行一次完整的磁盘对账同步 */
+  async reconcileMonitoredFolders(): Promise<any> {
+    if (apiClient.reconcileMonitoredFolders) {
+      return await apiClient.reconcileMonitoredFolders();
+    }
+  }
+
   // ------------------------------------------------------------------------
   // 资产操作
   // ------------------------------------------------------------------------

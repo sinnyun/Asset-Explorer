@@ -218,6 +218,11 @@ class DesktopApiProvider implements ApiProvider {
     }
   }
 
+  /** 对全部监视文件夹执行一次完整的磁盘对账同步 */
+  async reconcileMonitoredFolders(): Promise<any> {
+    return await callRust('reconcile_monitored_folders');
+  }
+
   // ------------------------------------------------------------------------
   // 资产操作
   // ------------------------------------------------------------------------
