@@ -11,6 +11,7 @@ use crate::indexer::{scan_local_directory, scan_local_directory_incremental};
 use crate::metadata_extractor::extract_metadata;
 use crate::models::{AggregationReport, Asset, Collection, Folder, ScanResult, SmartFolder, Tag};
 use crate::thumbnail_cache::generate_or_get_thumbnail;
+use crate::sync::FolderChangeEvent;
 use crate::watcher::{backfill_existing_assets, WatcherRegistry};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -386,15 +387,17 @@ pub async fn update_folder(
 pub async fn delete_folder(
     db: State<'_, Database>,
     registry: State<'_, WatcherRegistry>,
+    app_handle: tauri::AppHandle,
     id: String,
 ) -> Result<(), String> {
     let db = db.inner().clone();
 
-    // 先查询文件夹路径，若为监控文件夹需从文件监控器中注销
-    let folder_path: Option<String> = {
+    // 先查询完整文件夹对象：用于（1）注销文件监控器（2）广播 folder:removed 事件
+    let folder_obj: Option<Folder> = {
         let folders = db.get_folders().unwrap_or_default();
-        folders.iter().find(|f| f.id == id).map(|f| f.path.clone())
+        folders.into_iter().find(|f| f.id == id)
     };
+    let folder_path = folder_obj.as_ref().map(|f| f.path.clone());
 
     tokio::task::spawn_blocking(move || db.delete_folder(&id))
         .await
@@ -403,6 +406,15 @@ pub async fn delete_folder(
     // 若该文件夹之前是监控目录，从文件监控器注销
     if let Some(path) = folder_path {
         let _ = registry.remove_folder(&path);
+    }
+
+    // 广播 folder:removed：前端监听器会移除该文件夹及其整棵子孙树、清理其下全部资产，
+    // 否则界面状态（尤其资产列表）会与数据库脱节，需重启才刷新。
+    if let Some(folder) = folder_obj {
+        let _ = app_handle.emit("folder:removed", FolderChangeEvent {
+            folder,
+            action: "removed".to_string(),
+        });
     }
     Ok(())
 }

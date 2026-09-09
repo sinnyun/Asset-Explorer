@@ -113,10 +113,8 @@ fn walk_disk(
         if p.is_dir() {
             walk_disk(&p, disk_dirs, disk_files);
         } else if p.is_file() {
-            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if infer_category_from_extension(ext) == "other" {
-                continue;
-            }
+            // 与 indexer 初始扫描保持一致：不再按扩展名过滤 "other"，
+            // 否则 .cdr/.ai/.indd 等设计文件在磁盘存在、却被对账忽略，改名后无法被重新入库
             if let Ok(meta) = std::fs::metadata(&p) {
                 let mt = meta.modified().ok().map(|t| {
                     let dt: chrono::DateTime<Utc> = t.into();
@@ -146,9 +144,7 @@ fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, r
         .unwrap_or_default();
 
     let asset_type = infer_category_from_extension(&extension).to_string();
-    if asset_type == "other" {
-        return None;
-    }
+    // 与 indexer 初始扫描保持一致：不再过滤 "other" 类型，避免设计文件无法被对账入库
 
     let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
     let folder_id = folder_id_map

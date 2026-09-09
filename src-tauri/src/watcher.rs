@@ -481,11 +481,8 @@ fn handle_file_additions(
         if !path.exists() || !path.is_file() {
             continue;
         }
-        // 非资产扩展名跳过
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if infer_category_from_extension(ext) == "other" {
-            continue;
-        }
+        // 与 indexer 保持一致：不按扩展名过滤，所有文件均纳入索引
+        // （初始扫描的 build_asset 不区分 "other"，运行时监控也需一致，否则改名后会"消失"）
         // 已在库中则跳过（幂等）
         if db.get_asset_by_path(path_str)?.is_some() {
             continue;
@@ -732,7 +729,7 @@ pub fn backfill_existing_assets(
 
     let mut new_assets: Vec<Asset> = Vec::new();
     let mut skipped_existing = 0usize;
-    let mut skipped_other = 0usize;
+    let skipped_other = 0usize;
 
     // 目录 路径→id 缓存：补齐索引通常涉及大量文件，避免逐文件全表查询目录
     let mut folder_cache: HashMap<String, String> = db
@@ -749,15 +746,12 @@ pub fn backfill_existing_assets(
             skipped_existing += 1;
             continue;
         }
-        // 非资产扩展名跳过
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if infer_category_from_extension(ext) == "other" {
-            skipped_other += 1;
-            continue;
-        }
+        // 非资产扩展名跳过：已移除——与初始扫描的 build_asset 行为保持一致，
+        // 否则 .cdr/.ai/.indd 等设计文件改名后会从库中"消失"（初始能入库、运行时却被过滤）
 
         let mut asset = create_asset_from_path(file_path)?;
-        asset.folder_id = resolve_folder_id(db, file_path, &mut folder_cache)?;
+        // 补齐索引时同样复用目录缓存，传入 app_handle 以支持未命中时的目录链补建
+        asset.folder_id = resolve_folder_id(app_handle, db, file_path, &mut folder_cache)?;
         new_assets.push(asset);
     }
 
