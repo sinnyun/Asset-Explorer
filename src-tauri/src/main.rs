@@ -21,10 +21,14 @@ use tauri::Manager;
 use watcher::WatcherRegistry;
 
 fn main() {
-    // 初始化本地 SQLite 数据库 (高并发 WAL 模式)
-    // 若主库文件损坏或无法打开，自动备份原文件并重建全新数据库；
-    // 仅在极端异常（文件系统问题等）下回退到内存模式，仍保持有效 data_dir。
-    let db = Database::init_v2().expect("初始化 Asset Explorer V2 数据库失败");
+    // Open only the V2 database. Report initialization failure visibly before exiting.
+    let db = match Database::init_v2() {
+        Ok(db) => db,
+        Err(error) => {
+            show_initialization_error(&error);
+            std::process::exit(1);
+        }
+    };
 
     // 克隆一份用于 setup 闭包，避免 move 后 on_window_event 无法使用
     let db_for_setup = db.clone();
@@ -174,4 +178,19 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 桌面客户端失败");
+}
+
+fn show_initialization_error(error: &str) {
+    let message = format!("初始化 Asset Explorer V2 数据库失败：\n{error}");
+    eprintln!("{message}");
+    #[cfg(windows)]
+    {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND};
+        let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        // The native modal dialog works before Tauri exists and in release builds without a console.
+        unsafe {
+            MessageBoxW(None, PCWSTR(message.as_ptr()), w!("Asset Explorer V2"), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        }
+    }
 }

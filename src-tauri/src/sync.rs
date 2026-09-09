@@ -64,12 +64,27 @@ pub fn mtime_of(path: &Path) -> Option<String> {
 /// 将文件系统路径规整为键（全部正斜杠转为反斜杠，去首尾空格与尾部分隔符，转小写），
 /// 确保跨平台/Windows下哈希表查找绝对一致，杜绝斜杠/大小写导致的失配。
 pub fn norm_key(p: &str) -> String {
-    p.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    crate::database::normalize_windows_path(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_disk_walk_does_not_publish_a_partial_snapshot() {
+        // A file cannot be traversed as a directory; no external fixture is needed.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let mut dirs = HashMap::new();
+        let mut files = HashMap::new();
+        let _ = walk_disk(&path, &mut dirs, &mut files);
+        assert!(dirs.is_empty() && files.is_empty(), "an unsuccessful traversal must not publish a snapshot for cleanup");
+    }
 }
 
 /// 格式化根路径（去首尾空白与末尾分隔符）。
 pub fn normalize_root(p: &str) -> String {
-    p.trim().trim_end_matches(['/', '\\']).to_string()
+    norm_key(p)
 }
 
 /// 判断路径是否位于根目录（含根本身）之下，兼容分隔符与大小写。
@@ -79,7 +94,7 @@ pub fn is_path_under(path: &str, root: &str) -> bool {
     if p == r {
         return true;
     }
-    p.starts_with(&format!("{}\\", r)) || p.starts_with(&format!("{}/", r))
+    p.starts_with(&format!("{}\\", r.trim_end_matches('\\')))
 }
 
 /// 计算目录的确定性文件夹 id（与 indexer.rs 的 `f_`+stable_hash 口径一致）。
@@ -93,43 +108,49 @@ fn walk_disk(
     dir: &Path,
     disk_dirs: &mut HashMap<String, (String, PathBuf)>,
     disk_files: &mut HashMap<String, (String, i64, PathBuf)>,
-) {
-    let dir_str = dir.to_string_lossy().to_string();
-    let dir_mtime = mtime_of(dir).unwrap_or_else(|| Utc::now().to_rfc3339());
-    disk_dirs.insert(norm_key(&dir_str), (dir_mtime, dir.to_path_buf()));
+) -> Result<(), String> {
+    // Publish only a complete traversal; failed snapshots must never drive cleanup.
+    let mut complete_dirs = HashMap::new();
+    let mut complete_files = HashMap::new();
+    walk_disk_entries(dir, &mut complete_dirs, &mut complete_files)?;
+    disk_dirs.extend(complete_dirs);
+    disk_files.extend(complete_files);
+    Ok(())
+}
 
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let p = entry.path();
-        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        if should_ignore_dir(&name) {
+fn walk_disk_entries(
+    dir: &Path,
+    disk_dirs: &mut HashMap<String, (String, PathBuf)>,
+    disk_files: &mut HashMap<String, (String, i64, PathBuf)>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("遍历目录 {} 失败: {e}", dir.display()))?;
+    let dir_mtime = mtime_of(dir)
+        .ok_or_else(|| format!("读取目录时间失败: {}", dir.display()))?;
+    disk_dirs.insert(norm_key(&dir.to_string_lossy()), (dir_mtime, dir.to_path_buf()));
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取目录条目失败: {e}"))?;
+        let path = entry.path();
+        if should_ignore_dir(&entry.file_name().to_string_lossy()) {
             continue;
         }
-
-        if p.is_dir() {
-            walk_disk(&p, disk_dirs, disk_files);
-        } else if p.is_file() {
-            // 与 indexer 初始扫描保持一致：不再按扩展名过滤 "other"，
-            // 否则 .cdr/.ai/.indd 等设计文件在磁盘存在、却被对账忽略，改名后无法被重新入库
-            if let Ok(meta) = std::fs::metadata(&p) {
-                let mt = meta.modified().ok().map(|t| {
-                    let dt: chrono::DateTime<Utc> = t.into();
-                    dt.to_rfc3339()
-                }).unwrap_or_else(|| Utc::now().to_rfc3339());
-                let p_str = p.to_string_lossy().to_string();
-                disk_files.insert(norm_key(&p_str), (mt, meta.len() as i64, p));
-            }
+        let file_type = entry.file_type().map_err(|e| format!("读取文件类型失败: {e}"))?;
+        if file_type.is_dir() {
+            walk_disk_entries(&path, disk_dirs, disk_files)?;
+        } else if file_type.is_file() {
+            let metadata = entry.metadata().map_err(|e| format!("读取文件属性失败: {e}"))?;
+            let modified = metadata.modified().map_err(|e| format!("读取文件时间失败: {e}"))?;
+            let modified: chrono::DateTime<Utc> = modified.into();
+            disk_files.insert(norm_key(&path.to_string_lossy()), (modified.to_rfc3339(), metadata.len() as i64, path));
         }
     }
+    Ok(())
 }
 
 /// 从磁盘文件构造资产对象（复用 indexer 的元数据提取口径）。
-fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, root_norm: &str) -> Option<Asset> {
-    let metadata = std::fs::metadata(path).ok()?;
+fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, root_norm: &str) -> Result<Asset, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("读取对账文件 {} 失败: {e}", path.display()))?;
     let file_size = metadata.len();
     let file_str = path.to_string_lossy().to_string();
 
@@ -152,10 +173,9 @@ fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, r
         .cloned()
         .unwrap_or_else(|| folder_id_for_root(&file_str, root_norm));
 
-    let modified_time = metadata.modified().ok().map(|t| {
-        let dt: chrono::DateTime<Utc> = t.into();
-        dt.to_rfc3339()
-    }).unwrap_or_else(|| Utc::now().to_rfc3339());
+    let modified: chrono::DateTime<Utc> = metadata.modified()
+        .map_err(|e| format!("读取对账文件时间失败: {e}"))?.into();
+    let modified_time = modified.to_rfc3339();
 
     let now_str = Utc::now().to_rfc3339();
     let id = format!("ast_{}", stable_hash(&file_str));
@@ -167,7 +187,7 @@ fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, r
         (None, None)
     };
 
-    Some(Asset {
+    Ok(Asset {
         id,
         name: file_name,
         path: file_str,
@@ -208,6 +228,17 @@ pub fn reconcile_root(
     root_path: &Path,
     _mode: ReconcileMode,
 ) -> Result<ReconcileReport, String> {
+    reconcile_with_events(db, root_path, &|name, payload| {
+        let _ = app.emit(name, payload);
+    })
+}
+
+/// Keep filesystem/database reconciliation testable without constructing a desktop window.
+pub(crate) fn reconcile_with_events(
+    db: &Database,
+    root_path: &Path,
+    emit: &dyn Fn(&str, serde_json::Value),
+) -> Result<ReconcileReport, String> {
     let root_str = root_path.to_string_lossy().to_string();
     if !root_path.exists() || !root_path.is_dir() {
         return Err(format!("对账路径不存在或非目录: {}", root_str));
@@ -237,27 +268,10 @@ pub fn reconcile_root(
     // ---- 2. 递归走查磁盘 ----
     let mut disk_dirs: HashMap<String, (String, PathBuf)> = HashMap::new();
     let mut disk_files: HashMap<String, (String, i64, PathBuf)> = HashMap::new();
-    walk_disk(root_path, &mut disk_dirs, &mut disk_files);
-
-    // ---- 3. 文件夹对账：删除库中有但磁盘已移除的文件夹 ----
-    for (key, folder) in &db_folder_by_key {
-        if !is_path_under(&folder.path, &root_norm) {
-            continue;
-        }
-        if !disk_dirs.contains_key(key) && !Path::new(&folder.path).exists() {
-            let _ = db.delete_folder_tree_by_path(&folder.path);
-            let _ = db.delete_assets_by_prefix(&folder.path);
-            report.folders_removed += 1;
-            println!("[Sync] 文件夹已从磁盘移除: {} (id: {})", folder.path, folder.id);
-            let _ = app.emit("folder:removed", FolderChangeEvent {
-                folder: folder.clone(),
-                action: "removed".to_string(),
-            });
-        }
-    }
+    walk_disk(root_path, &mut disk_dirs, &mut disk_files)?;
 
     // ---- 4. 文件夹对账：新增与更新（按路径长度升序，确保父级优先处理） ----
-    let mut sorted_dirs: Vec<(String, (String, PathBuf))> = disk_dirs.into_iter().collect();
+    let mut sorted_dirs: Vec<_> = disk_dirs.iter().collect();
     sorted_dirs.sort_by_key(|(_, (_, p))| p.as_os_str().len());
 
     for (key, (disk_mtime, dir_path)) in sorted_dirs {
@@ -266,7 +280,7 @@ pub fn reconcile_root(
         let parent = dir_path.parent().map(|p| p.to_string_lossy().to_string());
         let parent_id = parent.as_ref().and_then(|pp| dir_id_map.get(&norm_key(pp))).cloned();
 
-        match db_folder_by_key.get(&key) {
+        match db_folder_by_key.get(key) {
             Some(existing) => {
                 let name = dir_path
                     .file_name()
@@ -285,14 +299,14 @@ pub fn reconcile_root(
                     || updated.parent_id != existing.parent_id
                     || existing.mtime.as_deref() != Some(disk_mtime.as_str());
                 if changed {
-                    let _ = db.upsert_folder(&updated);
+                    db.upsert_folder(&updated)?;
                     report.folders_updated += 1;
-                    let _ = app.emit("folder:updated", FolderChangeEvent {
+                    emit("folder:updated", serde_json::json!(FolderChangeEvent {
                         folder: updated.clone(),
                         action: "updated".to_string(),
-                    });
+                    }));
                 }
-                dir_id_map.insert(key, existing.id.clone());
+                dir_id_map.insert(key.clone(), existing.id.clone());
             }
             None => {
                 let name = dir_path
@@ -313,13 +327,13 @@ pub fn reconcile_root(
                     asset_count: None,
                     mtime: Some(disk_mtime.clone()),
                 };
-                let _ = db.upsert_folder(&fresh);
-                dir_id_map.insert(key, id.clone());
+                db.upsert_folder(&fresh)?;
+                dir_id_map.insert(key.clone(), id.clone());
                 report.folders_added += 1;
-                let _ = app.emit("folder:added", FolderChangeEvent {
+                emit("folder:added", serde_json::json!(FolderChangeEvent {
                     folder: fresh,
                     action: "added".to_string(),
-                });
+                }));
             }
         }
     }
@@ -330,61 +344,82 @@ pub fn reconcile_root(
         match db_assets.get(key) {
             Some((_, _, db_mtime, db_size)) => {
                 if db_mtime != disk_mtime || db_size != disk_size {
-                    if let Some(asset) = build_asset_from_disk(file_path, &dir_id_map, &root_norm) {
-                        let _ = db.batch_save_assets(&[asset.clone()]);
+                    {
+                        let asset = build_asset_from_disk(file_path, &dir_id_map, &root_norm)?;
+                        db.batch_save_assets(&[asset.clone()])?;
                         report.assets_updated += 1;
-                        let _ = app.emit("asset:modified", AssetChangeEvent {
+                        emit("asset:modified", serde_json::json!(AssetChangeEvent {
                             asset_id: Some(asset.id.clone()),
                             path: asset.path.clone(),
                             action: "modified".to_string(),
                             asset: Some(asset),
-                        });
+                        }));
                     }
                 }
             }
             None => {
-                if let Some(asset) = build_asset_from_disk(file_path, &dir_id_map, &root_norm) {
-                    to_add.push(asset);
-                }
+                to_add.push(build_asset_from_disk(file_path, &dir_id_map, &root_norm)?);
             }
         }
     }
 
     if !to_add.is_empty() {
-        if let Ok(_) = db.batch_save_assets(&to_add) {
+        {
+            db.batch_save_assets(&to_add)?;
             report.assets_added += to_add.len();
             for asset in &to_add {
-                let _ = app.emit("asset:added", AssetChangeEvent {
+                emit("asset:added", serde_json::json!(AssetChangeEvent {
                     asset_id: Some(asset.id.clone()),
                     path: asset.path.clone(),
                     action: "added".to_string(),
                     asset: Some(asset.clone()),
-                });
+                }));
             }
         }
     }
 
-    // ---- 6. 资产对账：删除 ----
-    let mut doomed_ids: Vec<String> = Vec::new();
-    let mut doomed_paths: Vec<String> = Vec::new();
-    for (key, (id, orig_path, _, _)) in &db_assets {
-        if !disk_files.contains_key(key) && !Path::new(orig_path).exists() {
+    // Stage removals only after all reads and writes succeed. Permission errors are not absence.
+    let mut missing_folders = Vec::new();
+    for (key, folder) in &db_folder_by_key {
+        if is_path_under(&folder.path, &root_norm)
+            && !disk_dirs.contains_key(key)
+            && !Path::new(&folder.path).try_exists().map_err(|e| format!("检查目录失败: {e}"))?
+        {
+            missing_folders.push(folder);
+        }
+    }
+    let mut doomed_ids = Vec::new();
+    let mut doomed_paths = Vec::new();
+    for (key, (id, path, _, _)) in &db_assets {
+        if !disk_files.contains_key(key)
+            && !Path::new(path).try_exists().map_err(|e| format!("检查文件失败: {e}"))?
+        {
             doomed_ids.push(id.clone());
-            doomed_paths.push(orig_path.clone());
+            doomed_paths.push(path.clone());
         }
     }
 
-    if !doomed_ids.is_empty() {
-        if let Ok(n) = db.delete_assets_by_ids(&doomed_ids) {
-            report.assets_removed += n;
-            for (id, path) in doomed_ids.iter().zip(doomed_paths.iter()) {
-                let _ = app.emit("asset:removed", AssetChangeEvent {
-                    asset_id: Some(id.clone()),
-                    path: path.clone(),
-                    action: "removed".to_string(),
-                    asset: None,
-                });
-            }
+    if !missing_folders.is_empty() || !doomed_ids.is_empty() {
+        // Recheck the root before cleanup so a disconnected root is not treated as empty.
+        std::fs::read_dir(root_path).map_err(|e| format!("清理前检查根目录失败: {e}"))?;
+        let paths: Vec<String> = missing_folders.iter().map(|folder| folder.path.clone()).collect();
+        let (folders_removed, assets_removed) = if paths.is_empty() {
+            (0, db.delete_assets_by_ids(&doomed_ids)?)
+        } else {
+            db.complete_scan_removals(&paths, &doomed_ids)?
+        };
+        report.folders_removed += folders_removed;
+        report.assets_removed += assets_removed;
+        for folder in missing_folders {
+            emit("folder:removed", serde_json::json!(FolderChangeEvent {
+                folder: folder.clone(), action: "removed".to_string(),
+            }));
+        }
+        for (id, path) in doomed_ids.iter().zip(doomed_paths.iter()) {
+            emit("asset:removed", serde_json::json!(AssetChangeEvent {
+                asset_id: Some(id.clone()), path: path.clone(),
+                action: "removed".to_string(), asset: None,
+            }));
         }
     }
 

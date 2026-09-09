@@ -58,6 +58,7 @@ pub struct MutationSummary {
     pub revision: i64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetDetail {
     pub id: String,

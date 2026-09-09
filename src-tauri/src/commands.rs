@@ -527,11 +527,8 @@ pub async fn get_thumbnail(db: State<'_, Database>, asset_id: String, path: Stri
         let data_dir = db.get_data_dir().to_path_buf();
         let thumb_path = generate_or_get_thumbnail(p, max_dimension, &data_dir)?;
         let thumb_str = thumb_path.to_string_lossy().to_string();
-        // 将缩略图路径持久化到数据库。
-        // DB 可能损坏/只读时仅记录错误，不因持久化失败阻塞缩略图返回。
-        if let Err(e) = db.update_asset_thumbnail_url(&asset_id, &thumb_str) {
-            eprintln!("[Thumbnail] 持久化缩略图路径到数据库失败(非致命): {}", e);
-        }
+        // Preserve the command argument while V2 returns the derived cache path directly.
+        let _ = asset_id;
         Ok(thumb_str)
     })
     .await
@@ -572,7 +569,7 @@ pub async fn get_storage_stats(db: State<'_, Database>) -> Result<crate::databas
     .map_err(|e| e.to_string())?
 }
 
-/// 指令 22: 本地数据完整迁移 (数据库 + 缩略图缓存 + 配置文件)
+/// 指令 22: V2 尚未开放存储位置选择；返回明确错误，不触碰任何文件。
 #[tauri::command]
 pub async fn migrate_data_storage(db: State<'_, Database>, new_path: String) -> Result<String, String> {
     let db = db.inner().clone();
@@ -585,7 +582,7 @@ pub async fn migrate_data_storage(db: State<'_, Database>, new_path: String) -> 
     .map_err(|e| e.to_string())?
 }
 
-/// 指令 23: 安全重启软件应用 (使用迁移后的新数据库和目录)
+/// 指令 23: 安全重启软件应用
 #[tauri::command]
 pub fn restart_application(app_handle: tauri::AppHandle) {
     println!("[Lifecycle] 收到应用重启指令，正在安全重启...");

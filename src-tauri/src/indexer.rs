@@ -88,7 +88,7 @@ pub fn infer_category_from_extension(ext: &str) -> &'static str {
 /// 取 SHA-256 前 8 字节（16 hex 字符），确保 ID 稳定且紧凑
 pub fn stable_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
+    hasher.update(crate::database::normalize_windows_path(input).as_bytes());
     let result = hasher.finalize();
     hex::encode(&result[..8])
 }
@@ -105,8 +105,9 @@ fn build_asset(
     path_to_id: &std::collections::HashMap<PathBuf, String>,
     root_id: &str,
     now_str: &str,
-) -> Option<Asset> {
-    let metadata = fs::metadata(file_path).ok()?;
+) -> Result<Asset, String> {
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| format!("读取扫描文件 {} 失败: {e}", file_path.display()))?;
     let file_size = metadata.len();
     let file_str = file_path.to_string_lossy().to_string();
 
@@ -151,7 +152,7 @@ fn build_asset(
         (None, None)
     };
 
-    Some(Asset {
+    Ok(Asset {
         id,
         name: file_name,
         path: file_str,
@@ -234,7 +235,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
                 }
             }
             Err(e) => {
-                eprintln!("[Indexer] 遍历警告: {}", e);
+                return Err(format!("扫描目录遍历失败: {e}"));
             }
         }
     }
@@ -276,8 +277,8 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
 
     let assets: Vec<Asset> = discovered_files
         .par_iter()
-        .filter_map(|file_path| build_asset(file_path, &path_to_id, &root_id, &now_str))
-        .collect();
+        .map(|file_path| build_asset(file_path, &path_to_id, &root_id, &now_str))
+        .collect::<Result<Vec<_>, _>>()?;
 
 
     let total_scanned = assets.len();
@@ -364,7 +365,7 @@ pub fn scan_local_directory_incremental(
                 }
             }
             Err(e) => {
-                eprintln!("[Indexer] 遍历警告: {}", e);
+                return Err(format!("扫描目录遍历失败: {e}"));
             }
         }
     }
@@ -414,8 +415,8 @@ pub fn scan_local_directory_incremental(
     for chunk in discovered_files.chunks(CHUNK_SIZE) {
         let assets_in_chunk: Vec<Asset> = chunk
             .par_iter()
-            .filter_map(|fp| build_asset(fp, &path_to_id, &root_id, &now_str))
-            .collect();
+            .map(|fp| build_asset(fp, &path_to_id, &root_id, &now_str))
+            .collect::<Result<Vec<_>, _>>()?;
         processed += assets_in_chunk.len();
         // 调用方增量写库并推送进度 / 资产
         on_chunk(&assets_in_chunk, processed, total_files)?;
