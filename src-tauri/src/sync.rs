@@ -19,9 +19,8 @@ use tauri::{AppHandle, Emitter};
 /// 对账模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileMode {
-    /// 兼容枚举：均执行高可靠全树递归比对
+    /// Explicit user-requested maintenance only.
     Pruned,
-    Deep,
 }
 
 /// 文件夹级事件载荷（新增/更新/删除），经事件通道推送给前端实时刷新目录树。

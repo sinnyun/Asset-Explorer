@@ -2,17 +2,18 @@
 //! 模块：文件监控 (watcher.rs)
 //! 职责：使用 notify 库实时感知已监控文件夹的变动，作为"事件快速通道"：
 //!   - 单文件 新增/修改/删除 走快速通道秒级生效；
-//!   - 目录级 创建/重命名/移动 下沉到 sync::reconcile_root（磁盘为真相、mtime 增量），
-//!     保证目录树与嵌套资产的正确性，并修复"新子夹不上屏/删除重命名失效"等断点。
-//! 正确性不依赖事件流：由周期/回焦对账兜底（详阅 PLAN_realtime_reconcile.md）。
+//!   - 目录事件只修改目标子树，不升级为监控根目录的全盘扫描。
+//! 队列溢出会记录为脏状态，恢复由显式、可取消的维护任务执行。
 //! 依赖开源库：`notify`, `tauri`, `chrono`, `parking_lot`
 //! ============================================================================
 
 use crate::database::Database;
-use crate::indexer::{infer_category_from_extension, stable_hash};
+use crate::event_coalescer::{ChangeKind, EventCoalescer, RawFsEvent};
+use crate::index_jobs::IndexCoordinator;
+use crate::indexer::{infer_category_from_extension, scan_local_subtree_streaming, stable_hash, ScanBatch};
 use crate::metadata_extractor;
 use crate::models::{Asset, Folder};
-use crate::sync::{reconcile_root, FolderChangeEvent, ReconcileMode};
+use crate::sync::FolderChangeEvent;
 use chrono::Utc;
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -48,12 +49,14 @@ pub struct WatcherRegistry {
 
 impl WatcherRegistry {
     /// 创建全局文件监控器，注册所有已监控的文件夹，并启动后台事件处理线程。
-    pub fn new(app_handle: AppHandle, db: Arc<Database>) -> Result<Self, String> {
-        let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
+    pub fn new(app_handle: AppHandle, db: Arc<Database>, coordinator: IndexCoordinator) -> Result<Self, String> {
+        let (tx, rx) = mpsc::sync_channel::<Result<Event, notify::Error>>(8_192);
 
         let mut watcher = notify::recommended_watcher(
             move |res: Result<Event, notify::Error>| {
-                let _ = tx.send(res);
+                if let Err(error) = tx.try_send(res) {
+                    eprintln!("[Watcher] 有界事件队列已满或关闭，已丢弃事件并等待显式恢复: {error}");
+                }
             },
         )
         .map_err(|e| format!("创建文件监控器失败: {}", e))?;
@@ -89,7 +92,7 @@ impl WatcherRegistry {
         // 启动后台事件处理线程
         let handle_db = db.clone();
         std::thread::spawn(move || {
-            event_processing_loop(&app_handle, &handle_db, &rx);
+            event_processing_loop(&app_handle, &handle_db, &coordinator, &rx);
         });
 
         Ok(WatcherRegistry {
@@ -153,6 +156,7 @@ impl WatcherRegistry {
 fn event_processing_loop(
     app_handle: &AppHandle,
     db: &Database,
+    coordinator: &IndexCoordinator,
     rx: &mpsc::Receiver<Result<Event, notify::Error>>,
 ) {
     println!("[Watcher] 事件处理线程已启动");
@@ -167,7 +171,7 @@ fn event_processing_loop(
             Ok(Ok(event)) => {
                 pending.push(event);
                 if pending.len() >= MAX_BATCH_SIZE || last_flush.elapsed() >= FLUSH_INTERVAL {
-                    flush_events(app_handle, db, &pending);
+                    flush_events(app_handle, db, coordinator, &pending);
                     pending.clear();
                     last_flush = Instant::now();
                 }
@@ -177,7 +181,7 @@ fn event_processing_loop(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !pending.is_empty() && last_flush.elapsed() >= FLUSH_INTERVAL {
-                    flush_events(app_handle, db, &pending);
+                    flush_events(app_handle, db, coordinator, &pending);
                     pending.clear();
                     last_flush = Instant::now();
                 }
@@ -198,82 +202,68 @@ fn norm_path(p: &str) -> String {
 /// 批量处理积累的文件事件（事件快速通道）：
 /// - 文件级 增/删/改 直接处理；
 /// - 目录级 创建/重命名/移动 下沉为受范围子树对账，保证目录树正确性。
-fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
+fn flush_events(app_handle: &AppHandle, db: &Database, coordinator: &IndexCoordinator, events: &[Event]) {
     if events.is_empty() {
         return;
     }
 
-    // 一次性快照库内目录：既用于区分"删除的是文件还是目录"，
-    // 也构建 路径→id 缓存供本批全部新增文件共享，避免逐文件全表查询。
-    let db_folders = db.get_folders().unwrap_or_default();
-    let db_folder_paths: HashSet<String> = db_folders.iter().map(|f| f.path.clone()).collect();
-    let mut folder_cache: HashMap<String, String> = db_folders
-        .iter()
-        .map(|f| (norm_path(&f.path), f.id.clone()))
-        .collect();
+    let mut folder_cache: HashMap<String, String> = HashMap::new();
 
     let mut additions: HashSet<String> = HashSet::new();
     let mut removals: HashSet<String> = HashSet::new();
     let mut modifications: HashSet<String> = HashSet::new();
-    // 需要做目录级子树对账的路径（新建/重命名/移动的目录等）
-    let mut dir_reconcile: HashSet<String> = HashSet::new();
+    let mut directories: HashMap<String, ChangeKind> = HashMap::new();
+    let now = Instant::now();
+    let mut coalescer = EventCoalescer::new(8_192, Duration::ZERO);
 
     for event in events {
-        match &event.kind {
-            EventKind::Create(_) => {
-                for path in &event.paths {
-                    if path.is_dir() {
-                        // 新建目录：目录树及其内部文件整体下沉到子树对账，自动建 folder 行 + 索引文件。
-                        dir_reconcile.insert(path.to_string_lossy().to_string());
-                    } else if path.is_file() {
-                        additions.insert(path.to_string_lossy().to_string());
-                    }
-                }
-            }
-            EventKind::Remove(_) => {
-                for path in &event.paths {
-                    let ps = path.to_string_lossy().to_string();
-                    let is_known_folder = db_folder_paths.contains(&norm_path(&ps));
-                    // 目录删除（库内已知目录）→ 删除整棵文件夹树并广播
-                    if is_known_folder {
-                        remove_folder_tree(app_handle, db, path, &db_folder_paths);
-                    } else {
-                        removals.insert(ps);
-                    }
-                }
-            }
-            EventKind::Modify(kind) => match kind {
-                ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any => {
-                    // 内容或元数据修改：单文件快速通道
-                    for path in &event.paths {
-                        if path.is_file() {
-                            let ps = path.to_string_lossy().to_string();
-                            if db.get_asset_by_path(&ps).ok().flatten().is_some() {
-                                modifications.insert(ps);
-                            } else {
-                                additions.insert(ps);
-                            }
-                        }
-                    }
-                }
-                ModifyKind::Name(_) => {
-                    // 重命名/移动事件
-                    handle_rename_event(
-                        app_handle, db, event, &db_folder_paths,
-                        &mut additions, &mut removals, &mut modifications, &mut dir_reconcile,
-                    );
-                }
-                _ => {}
-            },
-            _ => {}
+        for path in &event.paths {
+            let path_text = path.to_string_lossy().to_string();
+            let known_directory = db.get_folder_by_path(&path_text).ok().flatten().is_some();
+            let is_directory = path.is_dir() || known_directory;
+            let kind = match &event.kind {
+                EventKind::Create(_) => ChangeKind::Create,
+                EventKind::Remove(_) => ChangeKind::Remove,
+                EventKind::Modify(ModifyKind::Name(_)) if path.exists() => ChangeKind::Create,
+                EventKind::Modify(ModifyKind::Name(_)) => ChangeKind::Remove,
+                EventKind::Modify(_) => ChangeKind::Modify,
+                _ => continue,
+            };
+            let raw = if is_directory {
+                RawFsEvent::directory("watcher", &path_text, kind, now)
+            } else {
+                RawFsEvent::file("watcher", &path_text, kind, now)
+            };
+            let _ = coalescer.push(raw);
         }
     }
 
-    // 处理目录级子树对账（后台线程，避免阻塞事件处理循环）
-    for dir_path in &dir_reconcile {
-        let p = Path::new(dir_path);
-        if p.exists() && p.is_dir() {
-            trigger_reconcile(app_handle, db, p.to_path_buf());
+    for change in coalescer.drain_ready(now) {
+        if change.is_directory {
+            directories.insert(change.normalized_path, change.kind);
+            continue;
+        }
+        match change.kind {
+            ChangeKind::Create | ChangeKind::Replace => {
+                additions.insert(change.normalized_path);
+            }
+            ChangeKind::Modify => {
+                modifications.insert(change.normalized_path);
+            }
+            ChangeKind::Remove => {
+                removals.insert(change.normalized_path);
+            }
+        }
+    }
+
+    for (directory, kind) in &directories {
+        match kind {
+            ChangeKind::Remove => remove_folder_tree(app_handle, db, Path::new(directory)),
+            ChangeKind::Create | ChangeKind::Replace | ChangeKind::Modify => {
+                if let Err(error) = schedule_subtree_scan(app_handle, db, coordinator, directory) {
+                    eprintln!("[Watcher] 安排子树扫描失败 {}: {}", directory, error);
+                }
+            }
         }
     }
 
@@ -296,63 +286,61 @@ fn flush_events(app_handle: &AppHandle, db: &Database, events: &[Event]) {
         }
     }
 
-    // 兜底对账：触发本批事件涉及的监控根目录后台对账，确保多级嵌套和级联状态完美同步
-    if let Ok(monitored) = db.get_monitored_folders() {
-        for m in monitored {
-            let m_path = m.path.clone();
-            let touched = events.iter().any(|ev| {
-                ev.paths.iter().any(|p| crate::sync::is_path_under(&p.to_string_lossy(), &m_path))
-            });
-            if touched {
-                trigger_reconcile(app_handle, db, PathBuf::from(m_path));
-            }
-        }
-    }
-
-    // 调试汇总：每批事件处理完后打印本批分类统计，便于确认"事件是否被正确感知与落库"
-    println!(
-        "[Watcher] 事件批处理完成: 原始事件 {} 个, 待新增 {} 个, 待删除 {} 个, 待修改 {} 个, 目录对账 {} 个",
-        events.len(),
-        additions.len(),
-        removals.len(),
-        modifications.len(),
-        dir_reconcile.len()
-    );
 }
 
-/// 触发一次后台子树对账（Deep）：定位其所属的根监视目录进行全量对账，确保目录树+嵌套资产完全正确。
-fn trigger_reconcile(app_handle: &AppHandle, db: &Database, dir: PathBuf) {
+fn schedule_subtree_scan(
+    app_handle: &AppHandle,
+    db: &Database,
+    coordinator: &IndexCoordinator,
+    directory: &str,
+) -> Result<String, String> {
+    let job_key = format!("subtree:{}", crate::database::normalize_windows_path(directory));
+    let path = directory.to_string();
+    let db = db.clone();
     let app = app_handle.clone();
-    let dbc = Arc::<Database>::new(db.clone());
-    std::thread::spawn(move || {
-        let root = if let Ok(monitored) = dbc.get_monitored_folders() {
-            let dir_str = dir.to_string_lossy().to_string();
-            monitored
-                .into_iter()
-                .find(|m| crate::sync::is_path_under(&dir_str, &m.path))
-                .map(|m| PathBuf::from(m.path))
-                .unwrap_or(dir)
-        } else {
-            dir
-        };
-        let _ = reconcile_root(&app, dbc.as_ref(), &root, ReconcileMode::Deep);
-    });
+    coordinator.start(job_key, move |cancelled| {
+        let mut subtree_root: Option<Folder> = None;
+        scan_local_subtree_streaming(&path, cancelled.as_ref(), &mut |batch| {
+            match batch {
+                ScanBatch::Started(mut root) => {
+                    root.parent_id = Path::new(&root.path).parent()
+                        .and_then(|parent| db.get_folder_by_path(&parent.to_string_lossy()).ok().flatten())
+                        .map(|parent| parent.id);
+                    db.batch_save_scan_results(&root, &[], &[])?;
+                    subtree_root = Some(root);
+                }
+                ScanBatch::Folders(folders) => {
+                    let root = subtree_root.as_ref().ok_or("子树根目录尚未初始化")?;
+                    db.batch_save_scan_results(root, &folders, &[])?;
+                }
+                ScanBatch::Assets(assets) => db.batch_save_assets(&assets)?,
+                ScanBatch::Progress(done) => {
+                    let _ = app.emit("query:invalidated", serde_json::json!({
+                        "pathPrefix": path,
+                        "indexed": done,
+                    }));
+                }
+                ScanBatch::Finished(_) => {
+                    let _ = app.emit("query:invalidated", serde_json::json!({ "pathPrefix": path }));
+                }
+            }
+            Ok(())
+        }).map(|_| ())
+    })
 }
 
 /// 删除某目录及其整棵子孙树（文件夹行级联删资产），并广播 folder:removed、
 /// 清理不在该目录结构下的孤儿资产。
-fn remove_folder_tree(app_handle: &AppHandle, db: &Database, path: &Path, db_folder_paths: &HashSet<String>) {
+fn remove_folder_tree(app_handle: &AppHandle, db: &Database, path: &Path) {
     let ps = path.to_string_lossy().to_string();
     let norm = norm_path(&ps);
 
     // 广播 folder:removed（取其库内原文件夹对象）
-    if let Ok(folders) = db.get_folders() {
-        if let Some(folder) = folders.iter().find(|f| norm_path(&f.path) == norm).cloned() {
-            let _ = app_handle.emit("folder:removed", FolderChangeEvent {
-                folder,
-                action: "removed".to_string(),
-            });
-        }
+    if let Ok(Some(folder)) = db.get_folder_by_path(&norm) {
+        let _ = app_handle.emit("folder:removed", FolderChangeEvent {
+            folder,
+            action: "removed".to_string(),
+        });
     }
 
     // 先清理不在该目录结构下的孤儿资产（如文件夹行已缺失、仅路径前缀匹配的资产）
@@ -363,57 +351,7 @@ fn remove_folder_tree(app_handle: &AppHandle, db: &Database, path: &Path, db_fol
 
     // 若仍存在前缀匹配的资产（文件夹行不存在导致的孤儿），按路径前缀兜底清理
     let _ = db.delete_assets_by_prefix(&norm);
-    let _ = db_folder_paths;
     println!("[Watcher] 目录已删除: {}", norm);
-}
-
-/// 处理重命名事件（可同时携带旧路径与目标路径）。
-/// - 目录：旧目录整棵子树删除 + 新目录子树对账；
-/// - 文件：按"库有无 + 磁盘有无"判定增/删/改。
-fn handle_rename_event(
-    app_handle: &AppHandle,
-    db: &Database,
-    event: &Event,
-    db_folder_paths: &HashSet<String>,
-    additions: &mut HashSet<String>,
-    removals: &mut HashSet<String>,
-    modifications: &mut HashSet<String>,
-    dir_reconcile: &mut HashSet<String>,
-) {
-    let all_paths: Vec<String> = event.paths.iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-
-    for path_str in all_paths {
-        let p = Path::new(&path_str);
-        let is_known_folder = db_folder_paths.contains(&norm_path(&path_str));
-
-        if is_known_folder {
-            // 该路径在库中登记为目录：若其磁盘路径已不存在，说明目录被改名/移动走 → 删旧树
-            if !p.exists() || p.is_dir() {
-                if !p.exists() {
-                    remove_folder_tree(app_handle, db, p, db_folder_paths);
-                }
-            }
-            continue;
-        }
-
-        if p.is_dir() {
-            // 新目录：做子树对账（递归建 folder 行 + 索引文件）
-            dir_reconcile.insert(path_str);
-            continue;
-        }
-
-        // 文件级：判定增/删/改
-        let in_db = db.get_asset_by_path(&path_str).ok().flatten().is_some();
-        if in_db && !p.exists() {
-            removals.insert(path_str);
-        } else if !in_db && p.exists() && p.is_file() {
-            additions.insert(path_str);
-        } else if in_db && p.exists() && p.is_file() {
-            modifications.insert(path_str);
-        }
-    }
 }
 
 /// 批量处理删除事件（文件级）
@@ -601,10 +539,8 @@ fn ensure_dir_chain(app_handle: &AppHandle, db: &Database, dir: &Path) -> Result
     let dir_str = dir.to_string_lossy().to_string();
     let dir_norm = norm_path(&dir_str);
     // 已存在则直接返回
-    if let Ok(folders) = db.get_folders() {
-        if let Some(existing) = folders.iter().find(|f| norm_path(&f.path) == dir_norm) {
-            return Ok(existing.id.clone());
-        }
+    if let Some(existing) = db.get_folder_by_path(&dir_norm)? {
+        return Ok(existing.id);
     }
 
     // 递归保证父目录存在

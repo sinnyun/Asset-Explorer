@@ -1103,6 +1103,29 @@ impl Database {
         iter.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
+    pub fn get_folder_by_path(&self, path: &str) -> Result<Option<Folder>, String> {
+        use rusqlite::OptionalExtension;
+        let normalized = normalize_windows_path(path);
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT id, name, path, parent_id, is_monitored, mtime_ns
+                 FROM folders WHERE normalized_path = ?1",
+                [normalized],
+                |row| {
+                    Ok(Folder {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        path: row.get(2)?,
+                        parent_id: row.get(3)?,
+                        is_monitored: row.get::<_, i32>(4)? != 0,
+                        asset_count: None,
+                        mtime: Some(chrono::DateTime::from_timestamp_nanos(row.get(5)?).to_rfc3339()),
+                    })
+                },
+            ).optional().map_err(|error| error.to_string())
+        })
+    }
+
     /// 获取所有已监控的文件夹（用于启动时自动挂载文件监听器）
     pub fn get_monitored_folders(&self) -> Result<Vec<Folder>, String> {
         let conn = self.conn.lock();

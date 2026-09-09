@@ -199,6 +199,23 @@ pub fn scan_local_directory_streaming(
     cancelled: &AtomicBool,
     on_batch: &mut dyn FnMut(ScanBatch) -> Result<(), String>,
 ) -> Result<StreamingScanSummary, String> {
+    scan_local_path_streaming(root_path_str, true, cancelled, on_batch)
+}
+
+pub fn scan_local_subtree_streaming(
+    root_path_str: &str,
+    cancelled: &AtomicBool,
+    on_batch: &mut dyn FnMut(ScanBatch) -> Result<(), String>,
+) -> Result<StreamingScanSummary, String> {
+    scan_local_path_streaming(root_path_str, false, cancelled, on_batch)
+}
+
+fn scan_local_path_streaming(
+    root_path_str: &str,
+    is_monitored_root: bool,
+    cancelled: &AtomicBool,
+    on_batch: &mut dyn FnMut(ScanBatch) -> Result<(), String>,
+) -> Result<StreamingScanSummary, String> {
     let started_at = Instant::now();
     let root_path = PathBuf::from(root_path_str);
     if !root_path.exists() {
@@ -208,7 +225,11 @@ pub fn scan_local_directory_streaming(
         return Err(format!("路径不是有效目录: {root_path_str}"));
     }
 
-    let root_id = format!("f_root_{}", stable_hash(root_path_str));
+    let root_id = if is_monitored_root {
+        format!("f_root_{}", stable_hash(root_path_str))
+    } else {
+        format!("f_{}", stable_hash(root_path_str))
+    };
     let root_folder = Folder {
         id: root_id.clone(),
         name: root_path.file_name()
@@ -216,7 +237,7 @@ pub fn scan_local_directory_streaming(
             .unwrap_or_else(|| root_path_str.to_string()),
         path: root_path_str.to_string(),
         parent_id: None,
-        is_monitored: true,
+        is_monitored: is_monitored_root,
         asset_count: None,
         mtime: None,
     };

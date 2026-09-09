@@ -5,6 +5,7 @@ mod aggregator;
 mod asset_query;
 mod commands;
 mod database;
+mod event_coalescer;
 mod index_jobs;
 mod indexer;
 mod metadata_extractor;
@@ -35,6 +36,8 @@ fn main() {
 
     // 克隆一份用于 setup 闭包，避免 move 后 on_window_event 无法使用
     let db_for_setup = db.clone();
+    let index_coordinator = IndexCoordinator::new(2, 32);
+    let coordinator_for_setup = index_coordinator.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -51,14 +54,18 @@ fn main() {
             println!("[SingleInstance] 检测到已有 AssetHub 实例正在运行，已唤醒已有窗口，新进程自动退出。");
         }))
         .manage(db.clone())
-        .manage(IndexCoordinator::new(2, 32))
+        .manage(index_coordinator)
         // Startup only opens storage and registers watchers. Expensive filesystem
         // maintenance is always an explicit, cancellable job.
         .setup(move |app| {
             println!("[Startup] Tauri 应用启动中，开始初始化监控...");
             // 创建全局文件监控注册表，支持运行时动态添加/移除监控文件夹
             let app_handle = app.handle().clone();
-            match WatcherRegistry::new(app_handle.clone(), Arc::new(db_for_setup.clone())) {
+            match WatcherRegistry::new(
+                app_handle.clone(),
+                Arc::new(db_for_setup.clone()),
+                coordinator_for_setup.clone(),
+            ) {
                 Ok(registry) => {
                     app.manage(registry);
                     println!("[Startup] 文件监控器初始化完成");

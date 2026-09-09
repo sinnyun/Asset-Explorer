@@ -926,7 +926,113 @@ fn desktop_scan_commands_are_backed_by_the_shared_coordinator() {
     assert!(commands.contains("coordinator: State<'_, IndexCoordinator>"));
     assert!(commands.contains("pub fn cancel_job_v2"));
     assert!(commands.contains("pub fn get_job_status_v2"));
-    assert!(main.contains("manage(IndexCoordinator::new("));
+    assert!(main.contains("IndexCoordinator::new("));
+    assert!(main.contains("manage(index_coordinator)"));
     assert!(main.contains("cancel_job_v2,"));
     assert!(main.contains("get_job_status_v2,"));
+}
+
+#[test]
+fn file_event_coalescer_collapses_bursts_by_path() {
+    use crate::event_coalescer::{ChangeKind, EventCoalescer, RawFsEvent};
+
+    let now = Instant::now();
+    let mut coalescer = EventCoalescer::new(16, Duration::from_millis(50));
+    coalescer.push(RawFsEvent::file("root", r"D:\assets\a.png", ChangeKind::Create, now));
+    coalescer.push(RawFsEvent::file("root", r"d:/assets/a.png", ChangeKind::Modify, now));
+    coalescer.push(RawFsEvent::file("root", r"D:\assets\b.png", ChangeKind::Create, now));
+    coalescer.push(RawFsEvent::file("root", r"D:\assets\b.png", ChangeKind::Remove, now));
+
+    let changes = coalescer.drain_ready(now + Duration::from_millis(51));
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, ChangeKind::Create);
+    assert!(changes[0].normalized_path.ends_with(r"assets\a.png"));
+}
+
+#[test]
+fn file_event_coalescer_handles_replacement_and_directory_dominance() {
+    use crate::event_coalescer::{ChangeKind, EventCoalescer, RawFsEvent};
+
+    let now = Instant::now();
+    let mut coalescer = EventCoalescer::new(16, Duration::ZERO);
+    coalescer.push(RawFsEvent::file("root", r"D:\assets\a.png", ChangeKind::Remove, now));
+    coalescer.push(RawFsEvent::file("root", r"D:\assets\a.png", ChangeKind::Create, now));
+    coalescer.push(RawFsEvent::file("root", r"D:\assets\folder\child.png", ChangeKind::Modify, now));
+    coalescer.push(RawFsEvent::directory("root", r"D:\assets\folder", ChangeKind::Remove, now));
+
+    let changes = coalescer.drain_ready(now);
+    assert_eq!(changes.len(), 2);
+    assert!(changes.iter().any(|change| change.kind == ChangeKind::Replace));
+    let directory = changes.iter().find(|change| change.is_directory).unwrap();
+    assert_eq!(directory.kind, ChangeKind::Remove);
+    assert!(!changes.iter().any(|change| change.normalized_path.ends_with("child.png")));
+}
+
+#[test]
+fn file_event_coalescer_marks_root_dirty_on_capacity_overflow() {
+    use crate::event_coalescer::{ChangeKind, EventCoalescer, RawFsEvent};
+
+    let now = Instant::now();
+    let mut coalescer = EventCoalescer::new(1, Duration::ZERO);
+    assert!(coalescer.push(RawFsEvent::file("root", "a", ChangeKind::Modify, now)));
+    assert!(!coalescer.push(RawFsEvent::file("root", "b", ChangeKind::Modify, now)));
+    assert!(coalescer.is_root_dirty("root"));
+}
+
+#[test]
+fn watcher_uses_a_bounded_queue_and_never_reconciles_a_whole_root() {
+    let watcher = include_str!("watcher.rs");
+    assert!(watcher.contains("sync_channel::<Result<Event, notify::Error>>(8_192)"));
+    assert!(watcher.contains("try_send"));
+    assert!(watcher.contains("EventCoalescer"));
+    assert!(!watcher.contains("reconcile_root"));
+    assert!(!watcher.contains("trigger_reconcile"));
+}
+
+#[test]
+fn watcher_folder_lookup_is_an_indexed_single_path_query() {
+    let (dir, db) = test_db("watcher-folder-lookup");
+    db.insert_folder(&folder("folder-a", r"D:\assets\nested")).unwrap();
+    let found = db.get_folder_by_path(r"d:/ASSETS/nested/").unwrap().unwrap();
+    assert_eq!(found.id, "folder-a");
+    let plan = connection(&dir)
+        .prepare("EXPLAIN QUERY PLAN SELECT id FROM folders WHERE normalized_path=?1")
+        .unwrap()
+        .query_row([crate::database::normalize_windows_path(r"D:\assets\nested")], |row| row.get::<_, String>(3))
+        .unwrap();
+    assert!(plan.contains("normalized_path"));
+
+    let watcher = include_str!("watcher.rs");
+    let start = watcher.find("fn flush_events").unwrap();
+    let end = watcher[start..].find("fn remove_folder_tree").unwrap() + start;
+    assert!(!watcher[start..end].contains("get_folders()"));
+}
+
+#[test]
+fn watcher_directory_create_uses_bounded_subtree_scan() {
+    let watcher = include_str!("watcher.rs");
+    assert!(watcher.contains("IndexCoordinator"));
+    assert!(watcher.contains("scan_local_subtree_streaming"));
+    assert!(watcher.contains("coordinator.start("));
+}
+
+#[test]
+fn subtree_scan_does_not_register_the_subdirectory_as_a_monitored_root() {
+    use crate::indexer::{scan_local_subtree_streaming, ScanBatch};
+    use std::sync::atomic::AtomicBool;
+
+    let dir = TestDir::new("subtree-scan");
+    let root = dir.join("subtree");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut started = None;
+    scan_local_subtree_streaming(root.to_str().unwrap(), &AtomicBool::new(false), &mut |batch| {
+        if let ScanBatch::Started(folder) = batch {
+            started = Some(folder);
+        }
+        Ok(())
+    }).unwrap();
+    let folder = started.unwrap();
+    assert!(!folder.is_monitored);
+    assert!(folder.id.starts_with("f_"));
+    assert!(!folder.id.starts_with("f_root_"));
 }
