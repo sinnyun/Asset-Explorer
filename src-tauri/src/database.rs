@@ -67,6 +67,12 @@ pub struct Database {
 /// 批量关联映射：asset_id → Vec<name_or_id>
 type AssocMap = HashMap<String, Vec<String>>;
 
+/// 单条 SQL 语句中允许的最大绑定参数数量。
+/// SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER=999，为稳妥起见取 500，
+/// 避免大量资产时单个 `IN (...)` 查询超出该上限而报
+/// "too many SQL variables" 错误。
+const SQLITE_VAR_LIMIT: usize = 500;
+
 /// 规范化根路径：去掉首尾空白与末尾分隔符，避免前缀误匹配。
 fn normalize_root(p: &str) -> String {
     p.trim().trim_end_matches(['/', '\\']).to_string()
@@ -698,58 +704,64 @@ impl Database {
         Ok(assets)
     }
 
-    /// 一次 JOIN 查询加载全部资产的标签（消除 N+1）
+    /// 分批 JOIN 查询加载全部资产的标签（消除 N+1，并规避单条 IN 超变量上限）
     fn load_tags_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
-        if asset_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let placeholders = vec!["?"; asset_ids.len()].join(",");
-        let query = format!(
-            "SELECT at.asset_id, t.id
-             FROM asset_tags at
-             JOIN tags t ON t.id = at.tag_id
-             WHERE at.asset_id IN ({})",
-            placeholders
-        );
-
-        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(asset_ids), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| e.to_string())?;
-
         let mut map: AssocMap = HashMap::new();
-        for r in rows.flatten() {
-            map.entry(r.0).or_default().push(r.1);
+        if asset_ids.is_empty() {
+            return Ok(map);
+        }
+        // 分批处理，避免单条 SQL 中 IN (...) 的绑定变量数超过 SQLite 上限
+        for chunk in asset_ids.chunks(SQLITE_VAR_LIMIT) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let query = format!(
+                "SELECT at.asset_id, t.id
+                 FROM asset_tags at
+                 JOIN tags t ON t.id = at.tag_id
+                 WHERE at.asset_id IN ({})",
+                placeholders
+            );
+
+            let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+
+            for r in rows.flatten() {
+                map.entry(r.0).or_default().push(r.1);
+            }
         }
         Ok(map)
     }
 
-    /// 一次 JOIN 查询加载全部资产的集合（消除 N+1）
+    /// 分批 JOIN 查询加载全部资产的集合（消除 N+1，并规避单条 IN 超变量上限）
     fn load_cols_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
-        if asset_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let placeholders = vec!["?"; asset_ids.len()].join(",");
-        let query = format!(
-            "SELECT ac.asset_id, c.id
-             FROM asset_collections ac
-             JOIN collections c ON c.id = ac.collection_id
-             WHERE ac.asset_id IN ({})",
-            placeholders
-        );
-
-        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(asset_ids), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| e.to_string())?;
-
         let mut map: AssocMap = HashMap::new();
-        for r in rows.flatten() {
-            map.entry(r.0).or_default().push(r.1);
+        if asset_ids.is_empty() {
+            return Ok(map);
+        }
+        // 分批处理，避免单条 SQL 中 IN (...) 的绑定变量数超过 SQLite 上限
+        for chunk in asset_ids.chunks(SQLITE_VAR_LIMIT) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let query = format!(
+                "SELECT ac.asset_id, c.id
+                 FROM asset_collections ac
+                 JOIN collections c ON c.id = ac.collection_id
+                 WHERE ac.asset_id IN ({})",
+                placeholders
+            );
+
+            let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+
+            for r in rows.flatten() {
+                map.entry(r.0).or_default().push(r.1);
+            }
         }
         Ok(map)
     }
