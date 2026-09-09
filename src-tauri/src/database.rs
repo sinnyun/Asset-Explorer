@@ -73,6 +73,9 @@ type AssocMap = HashMap<String, Vec<String>>;
 /// "too many SQL variables" 错误。
 const SQLITE_VAR_LIMIT: usize = 500;
 
+/// V2 使用独立数据库文件。旧版 assethub.db 保留在原处，不迁移也不删除。
+pub const V2_DATABASE_FILE: &str = "assethub-v2.db";
+
 /// 规范化根路径：去掉首尾空白与末尾分隔符，避免前缀误匹配。
 fn normalize_root(p: &str) -> String {
     p.trim().trim_end_matches(['/', '\\']).to_string()
@@ -89,113 +92,44 @@ fn is_path_under(path: &str, root: &str) -> bool {
 }
 
 impl Database {
-    /// 初始化并连接本地 SQLite 数据库文件
-    /// 自动从 app_config.json 读取自定义或默认存储路径
-    /// 若数据库文件已损坏，自动备份损坏文件并重建全新数据库
-    pub fn init() -> Result<Self, String> {
+    /// 创建或打开全新的 V2 数据库。
+    pub fn init_v2() -> Result<Self, String> {
         let db_dir = get_active_data_dir();
-        let _ = fs::create_dir_all(&db_dir);
+        fs::create_dir_all(&db_dir).map_err(|e| format!("创建 V2 数据目录失败: {e}"))?;
+        Self::init_v2_at(&db_dir.join(V2_DATABASE_FILE))
+    }
 
-        let db_path = db_dir.join("assethub.db");
-        println!("[Database] 打开本地 SQLite 数据库: {:?}", db_path);
+    /// 在指定位置创建 V2 数据库，供测试和显式存储位置使用。
+    pub fn init_v2_at(db_path: &Path) -> Result<Self, String> {
+        let data_dir = db_path
+            .parent()
+            .ok_or_else(|| "V2 数据库路径缺少父目录".to_string())?
+            .to_path_buf();
+        fs::create_dir_all(&data_dir).map_err(|e| format!("创建 V2 数据目录失败: {e}"))?;
 
-        // 若主库文件存在但已损坏，自动备份并重建
-        if db_path.exists() {
-            // 尝试快速完整性检测：仅验证 DB 文件头与表结构页可读
-            match Connection::open(&db_path) {
-                Ok(test_conn) => {
-                    // 尝试简单查询验证数据库可用性（schema 可读即视为基本健康）
-                    let check = test_conn.query_row(
-                        "SELECT 1 FROM sqlite_master LIMIT 1",
-                        [],
-                        |r| r.get::<_, i32>(0),
-                    );
-                    match check {
-                        Ok(_) => {
-                            // 数据库 schema 可读；再执行 quick_check 检测数据页完整性
-                            let quick_check_ok = test_conn
-                                .query_row("PRAGMA quick_check", [], |row| {
-                                    row.get::<_, String>(0)
-                                })
-                                .map(|result| result.trim().starts_with("ok"))
-                                .unwrap_or(false);
-                            if !quick_check_ok {
-                                // DB 文件损坏：备份原文件后重建
-                                eprintln!("[Database] 检测到数据库文件损坏 (PRAGMA quick_check), 正在备份并重建...");
-                                let backup_name = format!("assethub_corrupt_{}.db",
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0));
-                                let backup_path = db_dir.join(backup_name);
-                                if let Err(e) = fs::rename(&db_path, &backup_path) {
-                                    // rename 失败（如文件被占用），则跳过重建，尝试继续使用
-                                    eprintln!("[Database] 备份损坏数据库失败: {}, 将继续使用原文件", e);
-                                } else {
-                                    println!("[Database] 已备份损坏数据库至: {:?}", backup_path);
-                                    // 清理可能损坏的 WAL/SHM 文件
-                                    let _ = fs::remove_file(db_dir.join("assethub.db-wal"));
-                                    let _ = fs::remove_file(db_dir.join("assethub.db-shm"));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // schema 不可读，数据库可能完全损坏
-                            eprintln!("[Database] 数据库 schema 读取失败: {}, 备份并重建...", e);
-                            let backup_name = format!("assethub_corrupt_{}.db",
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0));
-                            let backup_path = db_dir.join(backup_name);
-                            let _ = fs::rename(&db_path, &backup_path);
-                            let _ = fs::remove_file(db_dir.join("assethub.db-wal"));
-                            let _ = fs::remove_file(db_dir.join("assethub.db-shm"));
-                        }
-                    }
-                }
-                Err(_) => {
-                    // 文件无法打开（可能 0 字节或非 SQLite 格式）
-                    let backup_path = db_dir.join("assethub_corrupt.db");
-                    let _ = fs::rename(&db_path, &backup_path);
-                    eprintln!("[Database] 数据库文件无法打开，已备份并重建: {:?}", backup_path);
-                }
-            }
-        }
-
-        // 打开（可能刚重建的）数据库
-        let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {}", e))?;
-
-        // 开启 WAL 高并发写入模式和外键约束
+        let conn = Connection::open(db_path).map_err(|e| format!("打开 V2 数据库失败: {e}"))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;",
+             PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;",
         )
-        .map_err(|e| format!("配置数据库 PRAGMA 失败: {}", e))?;
+        .map_err(|e| format!("配置 V2 数据库失败: {e}"))?;
 
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
-            data_dir: db_dir,
+            data_dir,
         };
-
         db.migrate_schema()?;
         Ok(db)
     }
 
-    /// 内存数据库初始化 (用于测试或快速启动备用)
-    /// data_dir 参数用于指定关联的数据目录（缩略图缓存等），
-    /// 默认使用全局激活的数据目录，避免缩略图路径解析错误。
-    pub fn init_in_memory(data_dir: Option<PathBuf>) -> Result<Self, String> {
-        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        let dir = data_dir.unwrap_or_else(get_active_data_dir);
-        let _ = fs::create_dir_all(&dir);
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-            data_dir: dir,
-        };
-        db.migrate_schema()?;
-        Ok(db)
+    pub fn asset_count(&self) -> Result<usize, String> {
+        self.conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get::<_, i64>(0))
+            .map(|count| count as usize)
+            .map_err(|e| format!("读取资产数量失败: {e}"))
     }
 
     /// 强制执行 WAL 检查点，安全刷盘

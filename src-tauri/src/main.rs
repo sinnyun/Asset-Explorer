@@ -11,6 +11,9 @@ mod sync;
 mod thumbnail_cache;
 mod watcher;
 
+#[cfg(test)]
+mod database_v2_tests;
+
 use commands::*;
 use database::Database;
 use std::sync::Arc;
@@ -21,19 +24,7 @@ fn main() {
     // 初始化本地 SQLite 数据库 (高并发 WAL 模式)
     // 若主库文件损坏或无法打开，自动备份原文件并重建全新数据库；
     // 仅在极端异常（文件系统问题等）下回退到内存模式，仍保持有效 data_dir。
-    let db = match Database::init() {
-        Ok(db) => db,
-        Err(err) => {
-            eprintln!("[Warning] 本地文件数据库初始化失败，尝试重建: {}", err);
-            match Database::init() {
-                Ok(db) => db,
-                Err(err2) => {
-                    eprintln!("[Warning] 重建文件数据库仍失败，切换至内存模式: {}", err2);
-                    Database::init_in_memory(None).expect("初始化数据库失败")
-                }
-            }
-        }
-    };
+    let db = Database::init_v2().expect("初始化 Asset Explorer V2 数据库失败");
 
     // 克隆一份用于 setup 闭包，避免 move 后 on_window_event 无法使用
     let db_for_setup = db.clone();
