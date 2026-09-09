@@ -7,7 +7,8 @@
 
 use crate::aggregator::{aggregate_asset_metrics, filter_assets_by_smart_folder};
 use crate::database::Database;
-use crate::indexer::{scan_local_directory, scan_local_directory_incremental};
+use crate::index_jobs::{IndexCoordinator, JobSnapshot};
+use crate::indexer::{scan_local_directory, scan_local_directory_streaming, ScanBatch};
 use crate::metadata_extractor::extract_metadata;
 use crate::models::{
     AggregationReport, Asset, AssetDetail, AssetPage, AssetQuery, Collection, Folder,
@@ -152,9 +153,9 @@ pub fn unwatch_folder(
 /// ------------------------------------------------------------------------
 /// 相比 scan_directory 的「同步一次性返回」，此命令采用后台线程 + 事件推送：
 ///   1. 命令立刻返回，添加监视文件夹的模态框可立即关闭，UI 不被阻塞；
-///   2. 扫描分两阶段推进，通过事件向前端实时上报：
-///        scan:started  —— 目录树构建完成，携带 root/子目录与文件总数；
-///        scan:chunk    —— 每批资产解析完，增量写库并推送该批资产 + 进度；
+///   2. 扫描按固定内存批次推进，通过紧凑事件向前端上报：
+///        scan:started  —— 根目录已登记；
+///        scan:progress —— 已持久化数量，前端据此刷新当前查询；
 ///        scan:finished —— 全部扫描完成，携带总文件数与耗时；
 ///        scan:failed   —— 扫描出错。
 ///   3. 文件边扫边显示，无需等待全部扫描结束。
@@ -162,9 +163,10 @@ pub fn unwatch_folder(
 pub async fn start_scan_directory(
     db: State<'_, Database>,
     registry: State<'_, WatcherRegistry>,
+    coordinator: State<'_, IndexCoordinator>,
     app_handle: tauri::AppHandle,
     path: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let db = db.inner().clone();
 
     // 立即将新路径注册到文件监控器，保证后续文件变更能被实时捕获
@@ -172,60 +174,73 @@ pub async fn start_scan_directory(
         eprintln!("[Watcher] start_scan_directory 注册监控失败: {}", e);
     }
 
-    // 后台线程执行增量扫描，避免占用 Tauri 主线程而阻塞 UI。
-    std::thread::spawn(move || {
+    let root_id = format!("f_root_{}", crate::indexer::stable_hash(&path));
+    coordinator.start(root_id, move |cancelled| {
         let emit_handle = app_handle.clone();
 
-        let result = scan_local_directory_incremental(
+        let mut root_folder: Option<Folder> = None;
+        let mut last_progress = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(200))
+            .unwrap_or_else(std::time::Instant::now);
+        let result = scan_local_directory_streaming(
             &path,
-            // ---- 阶段回调：目录树就绪 → 写入根目录/子目录并广播 scan:started ----
-            &mut |root_folder: &Folder, sub_folders: &[Folder], total_files: usize| {
-                // 一次性持久化整棵目录树（UPSERT，幂等）
-                db.batch_save_scan_results(root_folder, sub_folders, &[])?;
-                let _ = emit_handle.emit("scan:started", serde_json::json!({
-                    "root_folder": root_folder,
-                    "sub_folders": sub_folders,
-                    "total": total_files,
-                }));
-                Ok(())
-            },
-            // ---- 阶段回调：每批资产解析完 → 增量写库并广播 scan:chunk ----
-            &mut |chunk_assets: &[Asset], done: usize, total_files: usize| {
-                if chunk_assets.is_empty() {
-                    // 空批次也广播进度，让前端进度条持续推进
-                    let _ = emit_handle.emit("scan:chunk", serde_json::json!({
-                        "assets": [],
-                        "done": done,
-                        "total": total_files,
-                    }));
-                    return Ok(());
+            cancelled.as_ref(),
+            &mut |batch| {
+                match batch {
+                    ScanBatch::Started(root) => {
+                        db.batch_save_scan_results(&root, &[], &[])?;
+                        let _ = emit_handle.emit("scan:started", serde_json::json!({
+                            "rootId": root.id,
+                            "path": root.path,
+                        }));
+                        root_folder = Some(root);
+                    }
+                    ScanBatch::Folders(folders) => {
+                        let root = root_folder.as_ref().ok_or("扫描根目录尚未初始化")?;
+                        db.batch_save_scan_results(root, &folders, &[])?;
+                    }
+                    ScanBatch::Assets(items) => db.batch_save_assets(&items)?,
+                    ScanBatch::Progress(done) => {
+                        if last_progress.elapsed() >= std::time::Duration::from_millis(200) {
+                            let _ = emit_handle.emit("scan:progress", serde_json::json!({
+                                "done": done,
+                            }));
+                            last_progress = std::time::Instant::now();
+                        }
+                    }
+                    ScanBatch::Finished(summary) => {
+                        let _ = emit_handle.emit("scan:finished", serde_json::json!({
+                            "rootId": summary.root_folder.id,
+                            "totalFilesScanned": summary.total_files_scanned,
+                            "totalDurationMs": summary.total_duration_ms,
+                        }));
+                    }
                 }
-                db.batch_save_assets(chunk_assets)?;
-                let _ = emit_handle.emit("scan:chunk", serde_json::json!({
-                    "assets": chunk_assets,
-                    "done": done,
-                    "total": total_files,
-                }));
                 Ok(())
-            },
+            }
         );
 
-        match result {
-            Ok(scan_res) => {
-                let _ = emit_handle.emit("scan:finished", serde_json::json!({
-                    "root_folder": scan_res.root_folder,
-                    "sub_folders": scan_res.sub_folders,
-                    "total_files_scanned": scan_res.total_files_scanned,
-                    "total_duration_ms": scan_res.total_duration_ms,
-                }));
-            }
-            Err(e) => {
-                let _ = emit_handle.emit("scan:failed", serde_json::json!({ "error": e }));
-            }
+        if let Err(error) = &result {
+            let _ = emit_handle.emit("scan:failed", serde_json::json!({ "error": error }));
         }
-    });
+        result.map(|_| ())
+    })
+}
 
-    Ok(())
+#[tauri::command]
+pub fn cancel_job_v2(
+    coordinator: State<'_, IndexCoordinator>,
+    job_id: String,
+) -> Result<bool, String> {
+    Ok(coordinator.cancel(&job_id))
+}
+
+#[tauri::command]
+pub fn get_job_status_v2(
+    coordinator: State<'_, IndexCoordinator>,
+    job_id: String,
+) -> Result<JobSnapshot, String> {
+    coordinator.status(&job_id).ok_or_else(|| format!("未知任务: {job_id}"))
 }
 
 /// 指令 2b: 全文搜索资产（SQLite FTS5）

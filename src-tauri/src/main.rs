@@ -5,6 +5,7 @@ mod aggregator;
 mod asset_query;
 mod commands;
 mod database;
+mod index_jobs;
 mod indexer;
 mod metadata_extractor;
 mod models;
@@ -17,6 +18,7 @@ mod database_v2_tests;
 
 use commands::*;
 use database::Database;
+use index_jobs::IndexCoordinator;
 use std::sync::Arc;
 use tauri::Manager;
 use watcher::WatcherRegistry;
@@ -49,6 +51,7 @@ fn main() {
             println!("[SingleInstance] 检测到已有 AssetHub 实例正在运行，已唤醒已有窗口，新进程自动退出。");
         }))
         .manage(db.clone())
+        .manage(IndexCoordinator::new(2, 32))
         // Startup only opens storage and registers watchers. Expensive filesystem
         // maintenance is always an explicit, cancellable job.
         .setup(move |app| {
@@ -89,6 +92,8 @@ fn main() {
             load_workspace,
             scan_directory,
             start_scan_directory,
+            cancel_job_v2,
+            get_job_status_v2,
             watch_folder,
             unwatch_folder,
             search_assets,

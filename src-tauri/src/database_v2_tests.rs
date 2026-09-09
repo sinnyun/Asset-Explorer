@@ -799,3 +799,134 @@ fn normal_startup_never_schedules_automatic_full_filesystem_work() {
         "window focus must not trigger filesystem reconciliation"
     );
 }
+
+#[test]
+fn streaming_scan_emits_bounded_batches_without_returning_a_snapshot() {
+    use crate::indexer::{scan_local_directory_streaming, ScanBatch, SCAN_BATCH_SIZE};
+    use std::sync::atomic::AtomicBool;
+
+    let dir = TestDir::new("streaming-scan");
+    let root = dir.join("input");
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    for index in 0..(SCAN_BATCH_SIZE + 17) {
+        std::fs::write(root.join("nested").join(format!("asset-{index}.txt")), b"x").unwrap();
+    }
+
+    let cancelled = AtomicBool::new(false);
+    let mut asset_count = 0usize;
+    let mut folder_count = 0usize;
+    let summary = scan_local_directory_streaming(
+        root.to_str().unwrap(),
+        &cancelled,
+        &mut |batch| {
+            match batch {
+                ScanBatch::Folders(items) => {
+                    assert!(!items.is_empty());
+                    assert!(items.len() <= SCAN_BATCH_SIZE);
+                    folder_count += items.len();
+                }
+                ScanBatch::Assets(items) => {
+                    assert!(!items.is_empty());
+                    assert!(items.len() <= SCAN_BATCH_SIZE);
+                    asset_count += items.len();
+                }
+                _ => {}
+            }
+            Ok(())
+        },
+    ).unwrap();
+
+    assert_eq!(folder_count, 1);
+    assert_eq!(asset_count, SCAN_BATCH_SIZE + 17);
+    assert_eq!(summary.total_files_scanned, asset_count);
+}
+
+#[test]
+fn streaming_scan_cancellation_stops_before_completion_event() {
+    use crate::indexer::{scan_local_directory_streaming, ScanBatch};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = TestDir::new("cancel-streaming-scan");
+    let root = dir.join("input");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("asset.txt"), b"x").unwrap();
+
+    let cancelled = AtomicBool::new(false);
+    let mut completed = false;
+    let error = scan_local_directory_streaming(
+        root.to_str().unwrap(),
+        &cancelled,
+        &mut |batch| {
+            if matches!(batch, ScanBatch::Started(_)) {
+                cancelled.store(true, Ordering::Release);
+            }
+            if matches!(batch, ScanBatch::Finished(_)) {
+                completed = true;
+            }
+            Ok(())
+        },
+    ).unwrap_err();
+
+    assert!(error.contains("cancel"));
+    assert!(!completed);
+}
+
+#[test]
+fn background_scan_command_uses_compact_streaming_events() {
+    let commands = include_str!("commands.rs");
+    assert!(commands.contains("scan_local_directory_streaming"));
+    let start = commands.find("pub async fn start_scan_directory").unwrap();
+    let end = commands[start..].find("/// 指令 2b").unwrap() + start;
+    let implementation = &commands[start..end];
+    assert!(!implementation.contains("\"assets\":"), "scan events must invalidate queries instead of sending asset objects");
+    assert!(!implementation.contains("sub_folders"), "scan events must not send the complete folder tree");
+}
+
+#[test]
+fn index_coordinator_is_single_flight_per_root() {
+    use crate::index_jobs::IndexCoordinator;
+    use std::sync::mpsc::sync_channel;
+
+    let coordinator = IndexCoordinator::new(1, 4);
+    let (release_tx, release_rx) = sync_channel(0);
+    let first = coordinator.start("root-a", move |_| {
+        release_rx.recv().map_err(|error| error.to_string())?;
+        Ok(())
+    }).unwrap();
+    let second = coordinator.start("root-a", |_| panic!("duplicate job must not run")).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(coordinator.active_job_count(), 1);
+    release_tx.send(()).unwrap();
+    assert!(coordinator.wait(&first, Duration::from_secs(2)).unwrap().is_terminal());
+}
+
+#[test]
+fn index_coordinator_cancels_a_running_job() {
+    use crate::index_jobs::{IndexCoordinator, JobStatus};
+
+    let coordinator = IndexCoordinator::new(1, 4);
+    let job_id = coordinator.start("root-cancel", |cancelled| {
+        while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        Err("scan cancelled".to_string())
+    }).unwrap();
+
+    assert!(coordinator.cancel(&job_id));
+    let snapshot = coordinator.wait(&job_id, Duration::from_secs(2)).unwrap();
+    assert_eq!(snapshot.status, JobStatus::Cancelled);
+    assert_eq!(coordinator.active_job_count(), 0);
+}
+
+#[test]
+fn desktop_scan_commands_are_backed_by_the_shared_coordinator() {
+    let commands = include_str!("commands.rs");
+    let main = include_str!("main.rs");
+    assert!(commands.contains("coordinator: State<'_, IndexCoordinator>"));
+    assert!(commands.contains("pub fn cancel_job_v2"));
+    assert!(commands.contains("pub fn get_job_status_v2"));
+    assert!(main.contains("manage(IndexCoordinator::new("));
+    assert!(main.contains("cancel_job_v2,"));
+    assert!(main.contains("get_job_status_v2,"));
+}
