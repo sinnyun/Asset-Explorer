@@ -12,7 +12,8 @@
 
 import type {
   Asset, Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats,
+  AssetState, StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail,
 } from '../../types';
 
 /** 工作区扫描结果 */
@@ -51,11 +52,19 @@ export interface ApiProvider {
   /** 加载完整工作区数据（资产、文件夹、标签、集合、智能文件夹） */
   loadWorkspace(): Promise<Partial<AssetState>>;
 
+  getWorkspaceShell(): Promise<WorkspaceShell>;
+
+  queryAssets(query: AssetQuery): Promise<AssetPage>;
+
+  queryFolders(query: FolderQuery): Promise<FolderPage>;
+
+  getAssetDetails(ids: string[]): Promise<AssetDetail[]>;
+
   /** 扫描本地目录并返回结果 */
   scanDirectory(path: string): Promise<ScanResult | null>;
 
   /** 后台增量扫描本地目录（通过事件流推送进度与增量资产），命令立即返回 */
-  startScanDirectory(path: string): Promise<void>;
+  startScanDirectory(path: string): Promise<string | null>;
 
   /** 懒加载获取资产缩略图（base64 data URL） */
   getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null>;

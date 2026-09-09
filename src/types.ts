@@ -83,6 +83,90 @@ export interface SelectionItem {
 export type SortOption = 'name_asc' | 'name_desc' | 'date_modified_desc' | 'date_modified_asc' | 'size_desc' | 'size_asc';
 export type ThemeMode = 'light' | 'dark' | 'system';
 
+export type AssetSort = 'name_asc' | 'name_desc' | 'modified_desc' | 'modified_asc' | 'size_desc' | 'size_asc';
+
+export interface AssetQuery {
+  rootId?: string;
+  folderId?: string;
+  includeDescendants?: boolean;
+  search?: string;
+  tagIds?: string[];
+  collectionIds?: string[];
+  types?: string[];
+  rating?: number;
+  favorite?: boolean;
+  sort?: AssetSort;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface AssetSummary {
+  id: string;
+  name: string;
+  path: string;
+  type: string;
+  size: number;
+  folderId?: string;
+  mtimeNs: number;
+  rating: number;
+  favorite: boolean;
+  color?: string;
+  width?: number;
+  height?: number;
+  recordVersion: number;
+}
+
+export interface AssetDetail extends AssetSummary {
+  normalizedPath: string;
+  customName?: string;
+  notes?: string;
+}
+
+export interface AssetPage {
+  items: AssetSummary[];
+  nextCursor?: string;
+  totalApprox?: number;
+  queryRevision: number;
+  limit: number;
+}
+
+export interface FolderQuery {
+  rootId?: string;
+  parentId?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface FolderSummary {
+  id: string;
+  name: string;
+  path: string;
+  parentId?: string;
+  isMonitored: boolean;
+  assetCount: number;
+  hasChildren: boolean;
+  recordVersion: number;
+}
+
+export interface FolderPage {
+  items: FolderSummary[];
+  nextCursor?: string;
+  limit: number;
+}
+
+export interface WorkspaceShell {
+  roots: Folder[];
+  tags: Tag[];
+  collections: Collection[];
+  smartFolders: SmartFolder[];
+  revision: number;
+}
+
+export interface SelectionExpression {
+  query: AssetQuery;
+  excludedIds: string[];
+}
+
 export interface StorageStats {
   data_dir: string;
   db_size_bytes: number;

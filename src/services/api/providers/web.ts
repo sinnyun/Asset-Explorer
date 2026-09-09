@@ -11,7 +11,8 @@
 
 import type {
   Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats,
+  AssetState, StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail,
 } from '../../../types';
 import type { ApiProvider, ScanResult } from '../types';
 import { normalizeFolders, normalizeAssets, normalizeSmartFolders } from '../utils';
@@ -133,6 +134,13 @@ async function apiRequest<T>(
   }
 }
 
+function requireData<T>(response: ApiResponse<T>): T {
+  if (!response.success || response.data === undefined) {
+    throw new Error(response.error || 'API response did not include data');
+  }
+  return response.data;
+}
+
 // ============================================================================
 // Web Provider 实现
 // ============================================================================
@@ -141,6 +149,28 @@ class WebApiProvider implements ApiProvider {
   readonly isDesktop = false;
   readonly platform = 'web' as const;
   readonly envLabel = '[环境:Web·HTTP]';
+
+  async getWorkspaceShell(): Promise<WorkspaceShell> {
+    return requireData(await apiRequest<WorkspaceShell>('/api/v2/workspace-shell'));
+  }
+
+  async queryAssets(query: AssetQuery): Promise<AssetPage> {
+    return requireData(await apiRequest<AssetPage>('/api/v2/assets/query', {
+      method: 'POST', body: JSON.stringify(query),
+    }));
+  }
+
+  async queryFolders(query: FolderQuery): Promise<FolderPage> {
+    return requireData(await apiRequest<FolderPage>('/api/v2/folders/query', {
+      method: 'POST', body: JSON.stringify(query),
+    }));
+  }
+
+  async getAssetDetails(ids: string[]): Promise<AssetDetail[]> {
+    return requireData(await apiRequest<AssetDetail[]>('/api/v2/assets/details', {
+      method: 'POST', body: JSON.stringify({ ids }),
+    }));
+  }
 
   // ------------------------------------------------------------------------
   // 数据加载与扫描
@@ -203,8 +233,9 @@ class WebApiProvider implements ApiProvider {
   }
 
   /** Web 模式不支持后台目录扫描 */
-  async startScanDirectory(_path: string): Promise<void> {
+  async startScanDirectory(_path: string): Promise<string | null> {
     console.warn('[WebApi] Web 模式不支持本地文件扫描');
+    return null;
   }
 
   /** Web 模式使用 HTTP 缩略图 URL */

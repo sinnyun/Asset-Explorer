@@ -11,7 +11,8 @@
 
 import type {
   Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats,
+  AssetState, StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail,
 } from '../../../types';
 import type { ApiProvider, ScanResult } from '../types';
 import { normalizeFolders, normalizeAssets } from '../utils';
@@ -67,6 +68,14 @@ async function callRust<T>(cmd: string, args?: Record<string, unknown>): Promise
   }
 }
 
+async function callRustV2<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauriDesktop()) {
+    throw new Error(`[DesktopApi] ${cmd} 只能在桌面应用中调用`);
+  }
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<T>(cmd, args);
+}
+
 // ============================================================================
 // Desktop Provider 实现
 // ============================================================================
@@ -75,6 +84,22 @@ class DesktopApiProvider implements ApiProvider {
   readonly isDesktop = true;
   readonly platform = 'desktop' as const;
   readonly envLabel = '[环境:桌面·Rust]';
+
+  getWorkspaceShell(): Promise<WorkspaceShell> {
+    return callRustV2<WorkspaceShell>('get_workspace_shell_v2');
+  }
+
+  queryAssets(query: AssetQuery): Promise<AssetPage> {
+    return callRustV2<AssetPage>('query_assets_v2', { query });
+  }
+
+  queryFolders(query: FolderQuery): Promise<FolderPage> {
+    return callRustV2<FolderPage>('query_folders_v2', { query });
+  }
+
+  getAssetDetails(ids: string[]): Promise<AssetDetail[]> {
+    return callRustV2<AssetDetail[]>('get_asset_details_v2', { ids });
+  }
 
   // ------------------------------------------------------------------------
   // 数据加载与扫描
@@ -133,8 +158,8 @@ class DesktopApiProvider implements ApiProvider {
   }
 
   /** 后台增量扫描本地目录（scan:started / scan:chunk / scan:finished / scan:failed 事件流） */
-  async startScanDirectory(path: string): Promise<void> {
-    await callRust<void>('start_scan_directory', { path });
+  async startScanDirectory(path: string): Promise<string | null> {
+    return callRustV2<string>('start_scan_directory', { path });
   }
 
   /** 懒加载获取资产缩略图 (优先使用 Tauri 原生 asset 协议，避免 Base64 IPC 内存开销) */

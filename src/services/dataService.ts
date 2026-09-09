@@ -12,7 +12,7 @@
  */
 
 import { apiClient } from './api';
-import type { Folder, Tag, Collection, SmartFolder, AssetState } from '../types';
+import type { Folder, Tag, Collection, SmartFolder, AssetState, WorkspaceShell, AssetQuery, AssetPage, FolderQuery, FolderPage, AssetDetail } from '../types';
 import type { ScanResult } from './api/types';
 
 // ============================================================================
@@ -41,6 +41,22 @@ class DataService {
     return result;
   }
 
+  getWorkspaceShell(): Promise<WorkspaceShell> {
+    return apiClient.getWorkspaceShell();
+  }
+
+  queryAssets(query: AssetQuery): Promise<AssetPage> {
+    return apiClient.queryAssets(query);
+  }
+
+  queryFolders(query: FolderQuery): Promise<FolderPage> {
+    return apiClient.queryFolders(query);
+  }
+
+  getAssetDetails(ids: string[]): Promise<AssetDetail[]> {
+    return apiClient.getAssetDetails(ids);
+  }
+
   /** 异步触发后端扫描并持久化目录 */
   async scanDirectory(dirPath: string): Promise<ScanResult | null> {
     this.log('scanDirectory', `扫描目录: ${dirPath}`);
@@ -48,7 +64,7 @@ class DataService {
   }
 
   /** 后台增量扫描本地目录（事件流推送进度与增量资产），命令立即返回 */
-  async startScanDirectory(dirPath: string): Promise<void> {
+  async startScanDirectory(dirPath: string): Promise<string | null> {
     this.log('startScanDirectory', `后台增量扫描目录: ${dirPath}`);
     return await apiClient.startScanDirectory(dirPath);
   }

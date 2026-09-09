@@ -15,7 +15,8 @@
 import type { ApiProvider, ScanResult } from './types';
 import type {
   Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats,
+  AssetState, StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail,
 } from '../../types';
 
 // Re-export types for external use
@@ -98,10 +99,22 @@ export const apiClient: ApiProvider = {
   loadWorkspace(): Promise<Partial<AssetState>> {
     return getProvider().loadWorkspace();
   },
+  getWorkspaceShell(): Promise<WorkspaceShell> {
+    return getProvider().getWorkspaceShell();
+  },
+  queryAssets(query: AssetQuery): Promise<AssetPage> {
+    return getProvider().queryAssets(query);
+  },
+  queryFolders(query: FolderQuery): Promise<FolderPage> {
+    return getProvider().queryFolders(query);
+  },
+  getAssetDetails(ids: string[]): Promise<AssetDetail[]> {
+    return getProvider().getAssetDetails(ids);
+  },
   scanDirectory(path: string): Promise<ScanResult | null> {
     return getProvider().scanDirectory(path);
   },
-  startScanDirectory(path: string): Promise<void> {
+  startScanDirectory(path: string): Promise<string | null> {
     return getProvider().startScanDirectory(path);
   },
   getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {

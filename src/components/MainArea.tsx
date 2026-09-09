@@ -7,6 +7,7 @@ import { cn, formatBytes } from '../lib/utils';
 import { Asset, AssetState, Folder, SortOption, Tag } from '../types';
 import { MonitoredSplitView } from './MonitoredSplitView';
 import { ThumbnailImage } from './ThumbnailImage';
+import { assetDisplayGroupKey } from '../services/api/query';
 
 /**
  * 智能自适应标签栏组件
@@ -139,6 +140,10 @@ interface MainAreaProps {
   state: AssetState;
   filteredAssets: Asset[];
   filteredFolders: Folder[];
+  queryLoading: boolean;
+  queryError: string | null;
+  hasNextPage: boolean;
+  onLoadNextPage: () => void;
   onToggleSelection: (id: string, type: 'asset' | 'folder', multi: boolean) => void;
   onClearSelection: () => void;
   onChangeView: (mode: 'grid' | 'list') => void;
@@ -184,6 +189,10 @@ export function MainArea({
   state, 
   filteredAssets,
   filteredFolders,
+  queryLoading,
+  queryError,
+  hasNextPage,
+  onLoadNextPage,
   onToggleSelection, 
   onClearSelection,
   onChangeView,
@@ -253,11 +262,21 @@ export function MainArea({
       if (!a?.id || seenAssetIds.has(a.id)) return; // 跳过重复
       seenAssetIds.add(a.id);
 
-      if (!groupsMap.has(a.folderId)) {
-        const f = foldersById.get(a.folderId);
-        if (f) groupsMap.set(f.id, { folder: f, assets: [] });
+      const groupKey = assetDisplayGroupKey(a);
+      if (!groupsMap.has(groupKey)) {
+        const parentPath = a.path.replace(/[\\/][^\\/]+$/, '');
+        const fallbackId = groupKey;
+        const f = foldersById.get(a.folderId) ?? {
+          id: fallbackId,
+          name: parentPath.split(/[/\\]/).filter(Boolean).pop() || 'All Assets',
+          path: parentPath,
+          isMonitored: false,
+          tags: [],
+          collections: [],
+        };
+        groupsMap.set(f.id, { folder: f, assets: [] });
       }
-      const group = groupsMap.get(a.folderId);
+      const group = groupsMap.get(groupKey);
       if (group) {
         // 防御性去重：同一 folder group 内 asset.id 唯一，杜绝 React key 重复渲染警告
         if (!group.assets.some(existing => existing.id === a.id)) {
@@ -638,13 +657,37 @@ export function MainArea({
           );
         })}
 
-        {groups.length === 0 && (
+        {queryLoading && groups.length === 0 && (
+          <div className="h-full flex items-center justify-center text-sm text-neutral-400">Loading assets…</div>
+        )}
+
+        {queryError && groups.length === 0 && (
+          <div className="h-full flex flex-col items-center justify-center text-red-300">
+            <AlertTriangle size={36} className="mb-3 opacity-70" />
+            <p className="text-sm">{queryError}</p>
+          </div>
+        )}
+
+        {!queryLoading && !queryError && groups.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center text-neutral-500">
             <Box size={48} className="mb-4 opacity-30" />
             <p className="text-lg font-medium text-neutral-400">No content found</p>
             <p className="text-sm max-w-sm text-center mt-2">
               Try adjusting your filters, selecting a different folder, or enabling "Include Subfolders".
             </p>
+          </div>
+        )}
+
+        {hasNextPage && groups.length > 0 && (
+          <div className="py-6 flex justify-center">
+            <button
+              type="button"
+              disabled={queryLoading}
+              onClick={(event) => { event.stopPropagation(); onLoadNextPage(); }}
+              className="px-4 py-2 rounded-md border border-neutral-700 bg-neutral-800 text-sm hover:bg-neutral-700 disabled:opacity-50"
+            >
+              {queryLoading ? 'Loading…' : 'Load more'}
+            </button>
           </div>
         )}
       </div>
