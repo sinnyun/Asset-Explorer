@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod aggregator;
+mod asset_query;
 mod commands;
 mod database;
 mod indexer;
@@ -134,6 +135,10 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_workspace_shell_v2,
+            query_assets_v2,
+            query_folders_v2,
+            get_asset_details_v2,
             load_workspace,
             scan_directory,
             start_scan_directory,

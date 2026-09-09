@@ -278,6 +278,17 @@ impl Database {
         })
     }
 
+    pub fn current_revision(&self) -> Result<i64, String> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM app_meta WHERE key = 'revision'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("读取工作区版本失败: {e}"))
+        })
+    }
+
     pub(crate) fn read<T>(&self, read: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
         self.read_pool.with_connection(read)
     }

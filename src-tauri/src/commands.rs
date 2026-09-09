@@ -9,7 +9,10 @@ use crate::aggregator::{aggregate_asset_metrics, filter_assets_by_smart_folder};
 use crate::database::Database;
 use crate::indexer::{scan_local_directory, scan_local_directory_incremental};
 use crate::metadata_extractor::extract_metadata;
-use crate::models::{AggregationReport, Asset, Collection, Folder, ScanResult, SmartFolder, Tag};
+use crate::models::{
+    AggregationReport, Asset, AssetDetail, AssetPage, AssetQuery, Collection, Folder,
+    FolderPage, FolderQuery, ScanResult, SmartFolder, Tag, WorkspaceShell,
+};
 use crate::thumbnail_cache::generate_or_get_thumbnail;
 use crate::sync::FolderChangeEvent;
 use crate::watcher::{backfill_existing_assets, WatcherRegistry};
@@ -25,6 +28,55 @@ pub struct WorkspacePayload {
     pub collections: Vec<Collection>,
     pub smart_folders: Vec<SmartFolder>,
     pub assets: Vec<Asset>,
+}
+
+#[tauri::command]
+pub async fn get_workspace_shell_v2(db: State<'_, Database>) -> Result<WorkspaceShell, String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        Ok(WorkspaceShell {
+            roots: db.get_monitored_folders()?,
+            tags: db.get_tags()?,
+            collections: db.get_collections()?,
+            smart_folders: db.get_smart_folders()?,
+            revision: db.current_revision()?,
+        })
+    })
+    .await
+    .map_err(|e| format!("V2 工作区任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn query_assets_v2(
+    db: State<'_, Database>,
+    query: AssetQuery,
+) -> Result<AssetPage, String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.query_assets(&query))
+        .await
+        .map_err(|e| format!("V2 资产查询任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn query_folders_v2(
+    db: State<'_, Database>,
+    query: FolderQuery,
+) -> Result<FolderPage, String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.query_folders(&query))
+        .await
+        .map_err(|e| format!("V2 文件夹查询任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn get_asset_details_v2(
+    db: State<'_, Database>,
+    ids: Vec<String>,
+) -> Result<Vec<AssetDetail>, String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || db.get_asset_details(&ids))
+        .await
+        .map_err(|e| format!("V2 资产详情任务失败: {e}"))?
 }
 
 /// 指令 1: 异步加载本地 SQLite 数据库中的全量工作区数据。

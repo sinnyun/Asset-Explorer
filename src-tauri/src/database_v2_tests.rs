@@ -1,5 +1,8 @@
 use crate::database::{Database, V2_DATABASE_FILE};
-use crate::models::{Asset, AssetUserPatch, FileFact, Folder};
+use crate::models::{
+    Asset, AssetQuery, AssetSort, AssetUserPatch, FileFact, Folder, FolderQuery,
+    WorkspaceShell,
+};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -182,6 +185,150 @@ fn database_write_queue_has_a_fixed_capacity() {
     let (_dir, db) = test_db("write-capacity");
     assert_eq!(db.write_queue_capacity(), 256);
     assert_eq!(db.read_pool_capacity(), 4);
+}
+
+#[test]
+fn cursor_pages_are_stable_when_sort_values_are_equal() {
+    let (_dir, db) = test_db("cursor-stability");
+    let facts = (0..7)
+        .map(|index| {
+            let mut item = fact(
+                &format!("asset-{index}"),
+                &format!(r"d:\assets\{index}.png"),
+                100,
+                10,
+            );
+            item.name = "same.png".to_string();
+            item
+        })
+        .collect::<Vec<_>>();
+    db.upsert_file_facts(&facts).unwrap();
+
+    let mut query = AssetQuery {
+        sort: AssetSort::NameAsc,
+        limit: 3,
+        ..AssetQuery::default()
+    };
+    let first = db.query_assets(&query).unwrap();
+    assert_eq!(first.items.len(), 3);
+    assert!(first.next_cursor.is_some());
+
+    query.cursor = first.next_cursor;
+    let second = db.query_assets(&query).unwrap();
+    let first_ids = first.items.iter().map(|asset| &asset.id).collect::<std::collections::HashSet<_>>();
+    assert!(second.items.iter().all(|asset| !first_ids.contains(&asset.id)));
+    assert_eq!(second.items.len(), 3);
+}
+
+#[test]
+fn asset_query_rejects_invalid_cursor_and_clamps_page_size() {
+    let (_dir, db) = test_db("cursor-validation");
+    let invalid = AssetQuery {
+        cursor: Some("not-a-v2-cursor".to_string()),
+        ..AssetQuery::default()
+    };
+    assert!(db.query_assets(&invalid).unwrap_err().contains("游标"));
+
+    let query = AssetQuery { limit: 10_000, ..AssetQuery::default() };
+    let page = db.query_assets(&query).unwrap();
+    assert_eq!(page.limit, 300);
+}
+
+#[test]
+fn asset_query_filters_user_state_without_loading_the_full_table() {
+    let (_dir, db) = test_db("query-user-state");
+    db.upsert_file_facts(&[
+        fact("favorite", r"d:\assets\favorite.png", 100, 20),
+        fact("plain", r"d:\assets\plain.png", 100, 10),
+    ])
+    .unwrap();
+    db.patch_user_state(&AssetUserPatch {
+        asset_id: "favorite".to_string(),
+        favorite: Some(true),
+        ..AssetUserPatch::default()
+    })
+    .unwrap();
+
+    let page = db
+        .query_assets(&AssetQuery {
+            favorite: Some(true),
+            sort: AssetSort::ModifiedDesc,
+            ..AssetQuery::default()
+        })
+        .unwrap();
+    assert_eq!(page.items.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(), ["favorite"]);
+}
+
+#[test]
+fn folder_query_loads_only_the_requested_level() {
+    let (_dir, db) = test_db("lazy-folders");
+    let root = folder("root", r"d:\assets");
+    let mut child = folder("child", r"d:\assets\child");
+    child.parent_id = Some(root.id.clone());
+    let mut grandchild = folder("grandchild", r"d:\assets\child\deep");
+    grandchild.parent_id = Some(child.id.clone());
+    db.upsert_folder(&root).unwrap();
+    db.upsert_folder(&child).unwrap();
+    db.upsert_folder(&grandchild).unwrap();
+
+    let page = db
+        .query_folders(&FolderQuery {
+            parent_id: Some(root.id.clone()),
+            limit: 100,
+            ..FolderQuery::default()
+        })
+        .unwrap();
+    assert_eq!(page.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["child"]);
+}
+
+#[test]
+fn asset_details_are_loaded_only_for_requested_ids() {
+    let (_dir, db) = test_db("asset-details");
+    db.upsert_file_facts(&[
+        fact("a", r"d:\assets\a.png", 10, 10),
+        fact("b", r"d:\assets\b.png", 20, 20),
+        fact("c", r"d:\assets\c.png", 30, 30),
+    ])
+    .unwrap();
+
+    let details = db
+        .get_asset_details(&["b".to_string(), "a".to_string()])
+        .unwrap();
+    assert_eq!(details.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+}
+
+#[test]
+fn v2_query_dtos_round_trip_with_frontend_field_names() {
+    let query = AssetQuery {
+        folder_id: Some("folder-a".to_string()),
+        include_descendants: true,
+        sort: AssetSort::ModifiedDesc,
+        limit: 200,
+        ..AssetQuery::default()
+    };
+    let value = serde_json::to_value(&query).unwrap();
+    assert_eq!(value["folderId"], "folder-a");
+    assert_eq!(value["includeDescendants"], true);
+    assert_eq!(value["sort"], "modified_desc");
+    let decoded: AssetQuery = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.folder_id.as_deref(), Some("folder-a"));
+}
+
+#[test]
+fn v2_commands_are_registered_without_replacing_errors_with_empty_data() {
+    let main = include_str!("main.rs");
+    let commands = include_str!("commands.rs");
+    for command in [
+        "get_workspace_shell_v2",
+        "query_assets_v2",
+        "query_folders_v2",
+        "get_asset_details_v2",
+    ] {
+        assert!(main.contains(command), "missing command registration: {command}");
+        assert!(commands.contains(&format!("fn {command}")), "missing command implementation: {command}");
+    }
+    assert!(!commands.contains("unwrap_or_default() // v2"));
+    let _: Option<WorkspaceShell> = None;
 }
 
 fn connection(dir: &TestDir) -> Connection {

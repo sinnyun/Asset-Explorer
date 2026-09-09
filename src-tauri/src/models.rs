@@ -58,7 +58,6 @@ pub struct MutationSummary {
     pub revision: i64,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetDetail {
     pub id: String,
@@ -79,6 +78,144 @@ pub struct AssetDetail {
     pub notes: Option<String>,
     #[serde(rename = "recordVersion")]
     pub record_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetSort {
+    #[default]
+    NameAsc,
+    NameDesc,
+    ModifiedDesc,
+    ModifiedAsc,
+    SizeDesc,
+    SizeAsc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssetQuery {
+    #[serde(rename = "rootId")]
+    pub root_id: Option<String>,
+    #[serde(rename = "folderId")]
+    pub folder_id: Option<String>,
+    #[serde(rename = "includeDescendants")]
+    pub include_descendants: bool,
+    pub search: Option<String>,
+    #[serde(rename = "tagIds")]
+    pub tag_ids: Vec<String>,
+    #[serde(rename = "collectionIds")]
+    pub collection_ids: Vec<String>,
+    pub types: Vec<String>,
+    pub rating: Option<u8>,
+    pub favorite: Option<bool>,
+    pub sort: AssetSort,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+impl Default for AssetQuery {
+    fn default() -> Self {
+        Self {
+            root_id: None,
+            folder_id: None,
+            include_descendants: false,
+            search: None,
+            tag_ids: Vec::new(),
+            collection_ids: Vec::new(),
+            types: Vec::new(),
+            rating: None,
+            favorite: None,
+            sort: AssetSort::NameAsc,
+            cursor: None,
+            limit: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssetSummary {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub asset_type: String,
+    pub size: u64,
+    #[serde(rename = "folderId")]
+    pub folder_id: Option<String>,
+    #[serde(rename = "mtimeNs")]
+    pub mtime_ns: i64,
+    pub rating: u8,
+    pub favorite: bool,
+    pub color: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    #[serde(rename = "recordVersion")]
+    pub record_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssetPage {
+    pub items: Vec<AssetSummary>,
+    #[serde(rename = "nextCursor")]
+    pub next_cursor: Option<String>,
+    #[serde(rename = "totalApprox")]
+    pub total_approx: Option<u64>,
+    #[serde(rename = "queryRevision")]
+    pub query_revision: i64,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderQuery {
+    #[serde(rename = "rootId")]
+    pub root_id: Option<String>,
+    #[serde(rename = "parentId")]
+    pub parent_id: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+impl Default for FolderQuery {
+    fn default() -> Self {
+        Self { root_id: None, parent_id: None, cursor: None, limit: 100 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FolderSummary {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(rename = "parentId")]
+    pub parent_id: Option<String>,
+    #[serde(rename = "isMonitored")]
+    pub is_monitored: bool,
+    #[serde(rename = "assetCount")]
+    pub asset_count: u64,
+    #[serde(rename = "hasChildren")]
+    pub has_children: bool,
+    #[serde(rename = "recordVersion")]
+    pub record_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FolderPage {
+    pub items: Vec<FolderSummary>,
+    #[serde(rename = "nextCursor")]
+    pub next_cursor: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceShell {
+    pub roots: Vec<Folder>,
+    pub tags: Vec<Tag>,
+    pub collections: Vec<Collection>,
+    #[serde(rename = "smartFolders")]
+    pub smart_folders: Vec<SmartFolder>,
+    pub revision: i64,
 }
 
 /// 资产实体模型 (Asset)
