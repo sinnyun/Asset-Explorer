@@ -94,8 +94,8 @@ class DesktopApiProvider implements ApiProvider {
     }
 
     if (payload === null) {
-      // 非桌面环境或 IPC 不可用时返回空数据
-      return { folders: [], tags: [], collections: [], customSmartFolders: [], assets: [] };
+      // IPC 暂时不可用不是“空工作区”，让上层进入重试.
+      throw new Error('[DesktopApi] 无法加载工作区：Rust IPC 不可用');
     }
 
     // 标准化：确保 parentId 为 null 时转 undefined、tags/collections 不为 undefined

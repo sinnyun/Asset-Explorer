@@ -27,25 +27,16 @@ pub struct WorkspacePayload {
     pub assets: Vec<Asset>,
 }
 
-/// 指令 1: 异步加载本地 SQLite 数据库中的全量工作区数据 (启动先对账，确保程序关闭期间外部文件的修改、增删精准生效)
+/// 指令 1: 异步加载本地 SQLite 数据库中的全量工作区数据。
+/// 启动加载只读缓存；磁盘对账由后台监控任务负责，避免阻塞首屏。
 #[tauri::command]
 pub async fn load_workspace(
     app_handle: tauri::AppHandle,
     db: State<'_, Database>,
 ) -> Result<WorkspacePayload, String> {
     let db = db.inner().clone();
-    let app = app_handle.clone();
+    let _ = app_handle;
     tokio::task::spawn_blocking(move || {
-        // 先对所有已监控根目录执行一次磁盘对账同步，确保关机期间的外部修改被精准捕获并入库
-        if let Ok(monitored) = db.get_monitored_folders() {
-            for f in &monitored {
-                let p = Path::new(&f.path);
-                if p.exists() && p.is_dir() {
-                    let _ = crate::sync::reconcile_root(&app, &db, p, crate::sync::ReconcileMode::Deep);
-                }
-            }
-        }
-
         let folders = db.get_folders()?;
         let tags = db.get_tags()?;
         let collections = db.get_collections()?;
