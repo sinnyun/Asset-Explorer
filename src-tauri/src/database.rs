@@ -11,13 +11,13 @@ use crate::models::{
 };
 #[cfg(test)]
 use crate::models::AssetDetail;
-use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use parking_lot::{Condvar, Mutex};
+use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StorageStats {
@@ -91,7 +91,111 @@ fn revision_after_mutation(tx: &rusqlite::Transaction<'_>, affected: usize) -> R
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+    read_pool: Arc<ReadPool>,
+    writer: Arc<WriteActor>,
     data_dir: PathBuf,
+}
+
+const READ_POOL_CAPACITY: usize = 4;
+const WRITE_QUEUE_CAPACITY: usize = 256;
+
+struct ReadPoolState {
+    idle: Vec<Connection>,
+    open: usize,
+}
+
+struct ReadPool {
+    db_path: PathBuf,
+    capacity: usize,
+    state: Mutex<ReadPoolState>,
+    available: Condvar,
+}
+
+impl ReadPool {
+    fn new(db_path: PathBuf, capacity: usize) -> Self {
+        Self {
+            db_path,
+            capacity,
+            state: Mutex::new(ReadPoolState { idle: Vec::new(), open: 0 }),
+            available: Condvar::new(),
+        }
+    }
+
+    fn open_connection(&self) -> Result<Connection, String> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(&self.db_path, flags)
+            .map_err(|e| format!("打开 V2 只读连接失败: {e}"))?;
+        conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;")
+            .map_err(|e| format!("配置 V2 只读连接失败: {e}"))?;
+        Ok(conn)
+    }
+
+    fn with_connection<T>(&self, read: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        let connection = loop {
+            let mut state = self.state.lock();
+            if let Some(connection) = state.idle.pop() {
+                break connection;
+            }
+            if state.open < self.capacity {
+                state.open += 1;
+                drop(state);
+                match self.open_connection() {
+                    Ok(connection) => break connection,
+                    Err(error) => {
+                        let mut state = self.state.lock();
+                        state.open = state.open.saturating_sub(1);
+                        self.available.notify_one();
+                        return Err(error);
+                    }
+                }
+            }
+            self.available.wait(&mut state);
+        };
+
+        let result = read(&connection);
+        let mut state = self.state.lock();
+        state.idle.push(connection);
+        self.available.notify_one();
+        result
+    }
+}
+
+type WriteJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
+
+struct WriteActor {
+    sender: mpsc::SyncSender<WriteJob>,
+}
+
+impl WriteActor {
+    fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, String> {
+        let (sender, receiver) = mpsc::sync_channel::<WriteJob>(WRITE_QUEUE_CAPACITY);
+        std::thread::Builder::new()
+            .name("asset-db-writer".to_string())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let mut connection = connection.lock();
+                    job(&mut connection);
+                }
+            })
+            .map_err(|e| format!("启动 V2 数据库写入线程失败: {e}"))?;
+        Ok(Self { sender })
+    }
+
+    fn call<T, F>(&self, write: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+    {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        self.sender
+            .send(Box::new(move |connection| {
+                let _ = result_sender.send(write(connection));
+            }))
+            .map_err(|_| "V2 数据库写入线程已停止".to_string())?;
+        result_receiver
+            .recv()
+            .map_err(|_| "V2 数据库写入任务未返回结果".to_string())?
+    }
 }
 
 /// 批量关联映射：asset_id → Vec<name_or_id>
@@ -155,8 +259,11 @@ impl Database {
         )
         .map_err(|e| format!("配置 V2 数据库失败: {e}"))?;
 
+        let conn = Arc::new(Mutex::new(conn));
         let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            read_pool: Arc::new(ReadPool::new(db_path.to_path_buf(), READ_POOL_CAPACITY)),
+            writer: Arc::new(WriteActor::new(Arc::clone(&conn))?),
+            conn,
             data_dir,
         };
         db.migrate_schema()?;
@@ -164,11 +271,33 @@ impl Database {
     }
 
     pub fn asset_count(&self) -> Result<usize, String> {
-        self.conn
-            .lock()
-            .query_row("SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL", [], |row| row.get::<_, i64>(0))
-            .map(|count| count as usize)
-            .map_err(|e| format!("读取资产数量失败: {e}"))
+        self.read(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL", [], |row| row.get::<_, i64>(0))
+                .map(|count| count as usize)
+                .map_err(|e| format!("读取资产数量失败: {e}"))
+        })
+    }
+
+    pub(crate) fn read<T>(&self, read: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        self.read_pool.with_connection(read)
+    }
+
+    pub(crate) fn write<T, F>(&self, write: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+    {
+        self.writer.call(write)
+    }
+
+    #[cfg(test)]
+    pub fn write_queue_capacity(&self) -> usize {
+        WRITE_QUEUE_CAPACITY
+    }
+
+    #[cfg(test)]
+    pub fn read_pool_capacity(&self) -> usize {
+        READ_POOL_CAPACITY
     }
 
     /// 强制执行 WAL 检查点，安全刷盘
@@ -437,12 +566,14 @@ impl Database {
 
     /// 批量写入文件系统事实，不接触用户状态。
     pub fn upsert_file_facts(&self, facts: &[FileFact]) -> Result<usize, String> {
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction().map_err(|e| format!("开始文件事实事务失败: {e}"))?;
-        Self::write_file_facts(&tx, facts)?;
-        revision_after_mutation(&tx, facts.len())?;
-        tx.commit().map_err(|e| format!("提交文件事实失败: {e}"))?;
-        Ok(facts.len())
+        let facts = facts.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|e| format!("开始文件事实事务失败: {e}"))?;
+            Self::write_file_facts(&tx, &facts)?;
+            revision_after_mutation(&tx, facts.len())?;
+            tx.commit().map_err(|e| format!("提交文件事实失败: {e}"))?;
+            Ok(facts.len())
+        })
     }
 
     fn write_file_facts(tx: &rusqlite::Transaction<'_>, facts: &[FileFact]) -> Result<(), String> {
@@ -507,26 +638,28 @@ impl Database {
     }
 
     pub fn patch_user_state(&self, patch: &AssetUserPatch) -> Result<MutationSummary, String> {
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction().map_err(|e| format!("开始用户状态事务失败: {e}"))?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let affected = tx.execute(
-            "INSERT INTO asset_user_state(asset_id, rating, favorite, color, custom_name, notes, updated_at)
-             SELECT id, COALESCE(?2, 0), COALESCE(?3, 0), ?4, ?5, ?6, ?7
-             FROM assets WHERE id = ?1 AND deleted_at IS NULL
-             ON CONFLICT(asset_id) DO UPDATE SET
-                rating = COALESCE(?2, rating),
-                favorite = COALESCE(?3, favorite),
-                color = COALESCE(?4, color),
-                custom_name = COALESCE(?5, custom_name),
-                notes = COALESCE(?6, notes),
-                updated_at = ?7",
-            params![patch.asset_id, patch.rating, patch.favorite.map(i32::from),
-                patch.color, patch.custom_name, patch.notes, now],
-        ).map_err(|e| format!("更新用户状态失败: {e}"))?;
-        let revision = revision_after_mutation(&tx, affected)?;
-        tx.commit().map_err(|e| format!("提交用户状态失败: {e}"))?;
-        Ok(MutationSummary { affected, revision })
+        let patch = patch.clone();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|e| format!("开始用户状态事务失败: {e}"))?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let affected = tx.execute(
+                "INSERT INTO asset_user_state(asset_id, rating, favorite, color, custom_name, notes, updated_at)
+                 SELECT id, COALESCE(?2, 0), COALESCE(?3, 0), ?4, ?5, ?6, ?7
+                 FROM assets WHERE id = ?1 AND deleted_at IS NULL
+                 ON CONFLICT(asset_id) DO UPDATE SET
+                    rating = COALESCE(?2, rating),
+                    favorite = COALESCE(?3, favorite),
+                    color = COALESCE(?4, color),
+                    custom_name = COALESCE(?5, custom_name),
+                    notes = COALESCE(?6, notes),
+                    updated_at = ?7",
+                params![patch.asset_id, patch.rating, patch.favorite.map(i32::from),
+                    patch.color, patch.custom_name, patch.notes, now],
+            ).map_err(|e| format!("更新用户状态失败: {e}"))?;
+            let revision = revision_after_mutation(&tx, affected)?;
+            tx.commit().map_err(|e| format!("提交用户状态失败: {e}"))?;
+            Ok(MutationSummary { affected, revision })
+        })
     }
 
     #[cfg(test)]

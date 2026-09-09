@@ -3,6 +3,8 @@ use crate::models::{Asset, AssetUserPatch, FileFact, Folder};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 
 struct TestDir(PathBuf);
 
@@ -146,6 +148,40 @@ fn user_state_is_stored_outside_assets_table() {
         .table_columns("asset_user_state")
         .unwrap()
         .contains(&"rating".to_string()));
+}
+
+#[test]
+fn reads_do_not_wait_for_a_slow_writer_connection() {
+    let (_dir, db) = test_db("read-write-overlap");
+    let started = Arc::new(Barrier::new(2));
+    let writer_db = db.clone();
+    let writer_started = Arc::clone(&started);
+    let writer = std::thread::spawn(move || {
+        writer_db
+            .write(move |_conn| {
+                writer_started.wait();
+                std::thread::sleep(Duration::from_millis(250));
+                Ok(())
+            })
+            .unwrap();
+    });
+
+    started.wait();
+    let before = Instant::now();
+    assert_eq!(db.asset_count().unwrap(), 0);
+    assert!(
+        before.elapsed() < Duration::from_millis(150),
+        "read waited for the writer connection: {:?}",
+        before.elapsed()
+    );
+    writer.join().unwrap();
+}
+
+#[test]
+fn database_write_queue_has_a_fixed_capacity() {
+    let (_dir, db) = test_db("write-capacity");
+    assert_eq!(db.write_queue_capacity(), 256);
+    assert_eq!(db.read_pool_capacity(), 4);
 }
 
 fn connection(dir: &TestDir) -> Connection {
