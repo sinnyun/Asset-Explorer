@@ -1,6 +1,85 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// 文件系统可重建事实。该类型刻意不包含任何用户标记字段。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileFact {
+    pub id: String,
+    #[serde(rename = "folderId")]
+    pub folder_id: Option<String>,
+    pub path: String,
+    #[serde(rename = "normalizedPath")]
+    pub normalized_path: String,
+    pub name: String,
+    pub extension: String,
+    #[serde(rename = "type")]
+    pub asset_type: String,
+    pub mime: Option<String>,
+    pub size: u64,
+    #[serde(rename = "mtimeNs")]
+    pub mtime_ns: i64,
+    #[serde(rename = "volumeId")]
+    pub volume_id: Option<String>,
+    #[serde(rename = "fileId")]
+    pub file_id: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    #[serde(rename = "metadataStatus")]
+    pub metadata_status: String,
+    pub generation: i64,
+}
+
+/// 用户可编辑状态补丁，与文件事实写入通道完全分离。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AssetUserPatch {
+    #[serde(rename = "assetId")]
+    pub asset_id: String,
+    pub rating: Option<u8>,
+    pub favorite: Option<bool>,
+    pub color: Option<String>,
+    #[serde(rename = "customName")]
+    pub custom_name: Option<String>,
+    pub notes: Option<String>,
+}
+
+impl AssetUserPatch {
+    pub fn rating(asset_id: impl Into<String>, rating: u8) -> Self {
+        Self {
+            asset_id: asset_id.into(),
+            rating: Some(rating.min(5)),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationSummary {
+    pub affected: usize,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssetDetail {
+    pub id: String,
+    pub path: String,
+    #[serde(rename = "normalizedPath")]
+    pub normalized_path: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub asset_type: String,
+    pub size: u64,
+    #[serde(rename = "mtimeNs")]
+    pub mtime_ns: i64,
+    pub rating: u8,
+    pub favorite: bool,
+    pub color: Option<String>,
+    #[serde(rename = "customName")]
+    pub custom_name: Option<String>,
+    pub notes: Option<String>,
+    #[serde(rename = "recordVersion")]
+    pub record_version: i64,
+}
+
 /// 资产实体模型 (Asset)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {

@@ -5,7 +5,10 @@
 //! 依赖开源库：`rusqlite`, `parking_lot`, `dirs`, `fs_extra`
 //! ============================================================================
 
-use crate::models::{Asset, Collection, Folder, SmartFolder, SmartFolderRule, Tag};
+use crate::models::{
+    Asset, AssetDetail, AssetUserPatch, Collection, FileFact, Folder, MutationSummary,
+    SmartFolder, SmartFolderRule, Tag,
+};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -227,60 +230,105 @@ impl Database {
         Ok(())
     }
 
-    /// 创建或迁移核心数据表
+    /// 创建全新的 V2 schema。V2 数据库不兼容也不迁移旧表。
     fn migrate_schema(&self) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute_batch(
             "
-            -- 1. 文件夹表
-            CREATE TABLE IF NOT EXISTS folders (
+            BEGIN IMMEDIATE;
+
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR REPLACE INTO app_meta(key, value) VALUES ('schema_epoch', '2');
+            INSERT OR IGNORE INTO app_meta(key, value) VALUES ('revision', '0');
+
+            CREATE TABLE IF NOT EXISTS roots (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 path TEXT NOT NULL,
+                normalized_path TEXT NOT NULL UNIQUE,
+                online INTEGER NOT NULL DEFAULT 1,
+                dirty INTEGER NOT NULL DEFAULT 0,
+                active_generation INTEGER NOT NULL DEFAULT 0,
+                completed_generation INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS folders (
+                id TEXT PRIMARY KEY,
+                root_id TEXT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                normalized_path TEXT NOT NULL UNIQUE,
                 parent_id TEXT,
                 is_monitored INTEGER NOT NULL DEFAULT 0,
+                mtime_ns INTEGER NOT NULL DEFAULT 0,
+                last_seen_generation INTEGER NOT NULL DEFAULT 0,
+                record_version INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE,
                 FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE
             );
 
-            -- 2. 标签表（含 description 和 is_pinned 字段，用于持久化前端额外属性）
+            CREATE TABLE IF NOT EXISTS assets (
+                id TEXT PRIMARY KEY,
+                root_id TEXT,
+                folder_id TEXT,
+                path TEXT NOT NULL,
+                normalized_path TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                extension TEXT NOT NULL DEFAULT '',
+                asset_type TEXT NOT NULL,
+                mime TEXT,
+                size INTEGER NOT NULL CHECK(size >= 0),
+                mtime_ns INTEGER NOT NULL,
+                volume_id TEXT,
+                file_id TEXT,
+                width INTEGER,
+                height INTEGER,
+                duration_ms INTEGER,
+                metadata_status TEXT NOT NULL DEFAULT 'pending',
+                thumbnail_status TEXT NOT NULL DEFAULT 'missing',
+                thumbnail_version TEXT,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_generation INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER,
+                record_version INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE,
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_user_state (
+                asset_id TEXT PRIMARY KEY,
+                rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+                favorite INTEGER NOT NULL DEFAULT 0,
+                color TEXT,
+                custom_name TEXT,
+                notes TEXT,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS tags (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 color TEXT NOT NULL,
-                description TEXT DEFAULT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0
+                description TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0
             );
 
-            -- 3. 集合表（含 color、description 和 is_pinned 字段，用于持久化前端额外属性）
             CREATE TABLE IF NOT EXISTS collections (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
-                color TEXT DEFAULT NULL,
-                description TEXT DEFAULT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0
-            );
-
-            -- 4. 资产主表
-            CREATE TABLE IF NOT EXISTS assets (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                asset_type TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                folder_id TEXT NOT NULL,
-                date_modified TEXT NOT NULL,
-                date_added TEXT NOT NULL,
-                rating INTEGER NOT NULL DEFAULT 0,
-                favorite INTEGER NOT NULL DEFAULT 0,
                 color TEXT,
-                width INTEGER,
-                height INTEGER,
-                file_hash TEXT,
-                thumbnail_url TEXT,
-                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE
+                description TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0
             );
 
-            -- 5. 智能文件夹表
             CREATE TABLE IF NOT EXISTS smart_folders (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -290,7 +338,6 @@ impl Database {
                 is_search_history INTEGER NOT NULL DEFAULT 0
             );
 
-            -- 6. 资产-标签关联多对多表
             CREATE TABLE IF NOT EXISTS asset_tags (
                 asset_id TEXT NOT NULL,
                 tag_id TEXT NOT NULL,
@@ -299,7 +346,6 @@ impl Database {
                 FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
             );
 
-            -- 7. 资产-集合关联多对多表
             CREATE TABLE IF NOT EXISTS asset_collections (
                 asset_id TEXT NOT NULL,
                 collection_id TEXT NOT NULL,
@@ -308,65 +354,59 @@ impl Database {
                 FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
             );
 
-            -- 建立高性能查询索引
-            CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder_id);
-            CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(asset_type);
-            CREATE INDEX IF NOT EXISTS idx_assets_rating ON assets(rating);
-            CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(name);
+            CREATE TABLE IF NOT EXISTS scan_jobs (
+                id TEXT PRIMARY KEY,
+                root_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                discovered_count INTEGER NOT NULL DEFAULT 0,
+                indexed_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                error TEXT,
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS file_event_journal (
+                root_id TEXT NOT NULL,
+                normalized_path TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                observed_at INTEGER NOT NULL,
+                PRIMARY KEY (root_id, normalized_path),
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_errors (
+                asset_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                message TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (asset_id, stage),
+                FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS mutation_operations (
+                operation_id TEXT PRIMARY KEY,
+                affected INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_folders_parent_name ON folders(parent_id, name, id);
+            CREATE INDEX IF NOT EXISTS idx_folders_root_path ON folders(root_id, normalized_path);
+            CREATE INDEX IF NOT EXISTS idx_assets_folder_name ON assets(folder_id, name COLLATE NOCASE, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_folder_mtime ON assets(folder_id, mtime_ns DESC, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_folder_size ON assets(folder_id, size DESC, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_root_path ON assets(root_id, normalized_path);
+            CREATE INDEX IF NOT EXISTS idx_assets_type_mtime ON assets(asset_type, mtime_ns DESC, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_file_identity ON assets(volume_id, file_id);
+            CREATE INDEX IF NOT EXISTS idx_user_favorite_rating ON asset_user_state(favorite, rating, asset_id);
             CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag_id);
             CREATE INDEX IF NOT EXISTS idx_asset_cols_col ON asset_collections(collection_id);
-            ",
-        )
-        .map_err(|e| format!("数据库表结构初始化失败: {}", e))?;
 
-        // 兼容旧版数据库：通过 PRAGMA table_info 检查列是否存在，避免 ALTER 报错后仍忽略
-        // 替代之前"重复执行报错就忽略"的 hack 方式
-        let existing_columns = |table: &str| -> Vec<String> {
-            let mut stmt = match conn.prepare(&format!("PRAGMA table_info({})", table)) {
-                Ok(s) => s,
-                Err(_) => return Vec::new(),
-            };
-            let cols = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .and_then(|iter| iter.collect())
-                .unwrap_or_default();
-            cols
-        };
-
-        // tags 表迁移
-        let tag_cols = existing_columns("tags");
-        if !tag_cols.is_empty() && !tag_cols.iter().any(|c| c == "description") {
-            let _ = conn.execute_batch("ALTER TABLE tags ADD COLUMN description TEXT DEFAULT NULL;");
-        }
-        if !tag_cols.is_empty() && !tag_cols.iter().any(|c| c == "is_pinned") {
-            let _ = conn.execute_batch("ALTER TABLE tags ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
-        }
-
-        // collections 表迁移
-        let col_cols = existing_columns("collections");
-        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "color") {
-            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN color TEXT DEFAULT NULL;");
-        }
-        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "description") {
-            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN description TEXT DEFAULT NULL;");
-        }
-        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "is_pinned") {
-            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
-        }
-
-        // 5. folders 表迁移
-        //    新增 mtime 列：记录目录磁盘修改时间，供对账增量剪枝使用。
-        //    （内容级文件修改不会改变父目录 mtime，详阅 PLAN_realtime_reconcile.md）
-        let folder_cols = existing_columns("folders");
-        if !folder_cols.is_empty() && !folder_cols.iter().any(|c| c == "mtime") {
-            let _ = conn.execute_batch("ALTER TABLE folders ADD COLUMN mtime TEXT DEFAULT NULL;");
-        }
-
-        // 5. 创建 FTS5 全文搜索虚拟表（SQLite >= 3.41 bundled 自带 FTS5）
-        // 使用外部内容表关联 assets 表，FTS 索引通过触发器自动同步
-        conn.execute_batch(
-            "
-            -- FTS5 全文搜索虚拟表（外部内容关联 assets 表）
             CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
                 name,
                 path,
@@ -375,34 +415,7 @@ impl Database {
                 content_rowid='rowid',
                 tokenize='unicode61'
             );
-            ",
-        )
-        .map_err(|e| format!("FTS5 全文搜索索引初始化失败: {}", e))?;
 
-        // 仅当 assets 表已有数据但 FTS 索引为空时重建（首次升级场景）
-        // 已有 FTS 索引的场景无需重建，触发器将自动维护同步
-        let asset_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
-            .map_err(|e| format!("统计资产数量失败: {}", e))?;
-
-        let fts_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM assets_fts", [], |r| r.get(0))
-            .unwrap_or(0);
-
-        if asset_count > 0 && fts_count == 0 {
-            // 旧库升级首次迁移：将已有资产全量写入 FTS 索引
-            conn.execute_batch(
-                "
-                INSERT INTO assets_fts(assets_fts) VALUES('rebuild');
-                ",
-            )
-            .map_err(|e| format!("FTS5 索引重建失败: {}", e))?;
-            println!("[Database] FTS5 索引重建完成 ({} 条资产)", asset_count);
-        }
-        // 6. 为 assets 表创建 AFTER 触发器，实现 FTS 索引自动同步
-        //    - 当 assets 插入/更新/删除时自动维护 FTS 索引
-        conn.execute_batch(
-            "
             CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
                 INSERT INTO assets_fts(rowid, name, path, asset_type)
                 VALUES (new.rowid, new.name, new.path, new.asset_type);
@@ -413,17 +426,195 @@ impl Database {
                 VALUES ('delete', old.rowid, old.name, old.path, old.asset_type);
             END;
 
-            CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE ON assets BEGIN
+            CREATE TRIGGER IF NOT EXISTS assets_au
+            AFTER UPDATE OF name, path, asset_type ON assets BEGIN
                 INSERT INTO assets_fts(assets_fts, rowid, name, path, asset_type)
                 VALUES ('delete', old.rowid, old.name, old.path, old.asset_type);
                 INSERT INTO assets_fts(rowid, name, path, asset_type)
                 VALUES (new.rowid, new.name, new.path, new.asset_type);
             END;
+
+            COMMIT;
             ",
         )
-        .map_err(|e| format!("FTS5 触发器初始化失败: {}", e))?;
+        .map_err(|e| format!("V2 数据库表结构初始化失败: {e}"))?;
 
         Ok(())
+    }
+
+    /// 批量写入文件系统事实，不接触用户状态。
+    pub fn upsert_file_facts(&self, facts: &[FileFact]) -> Result<usize, String> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| format!("开始文件事实事务失败: {e}"))?;
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO assets (
+                        id, folder_id, path, normalized_path, name, extension, asset_type, mime,
+                        size, mtime_ns, volume_id, file_id, width, height, metadata_status,
+                        first_seen_at, last_seen_generation, record_version
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                        ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                        ?16, ?17, 1
+                     )
+                     ON CONFLICT(id) DO UPDATE SET
+                        folder_id = excluded.folder_id,
+                        path = excluded.path,
+                        normalized_path = excluded.normalized_path,
+                        name = excluded.name,
+                        extension = excluded.extension,
+                        asset_type = excluded.asset_type,
+                        mime = excluded.mime,
+                        size = excluded.size,
+                        mtime_ns = excluded.mtime_ns,
+                        volume_id = excluded.volume_id,
+                        file_id = excluded.file_id,
+                        width = excluded.width,
+                        height = excluded.height,
+                        metadata_status = excluded.metadata_status,
+                        last_seen_generation = excluded.last_seen_generation,
+                        deleted_at = NULL,
+                        record_version = assets.record_version + 1",
+                )
+                .map_err(|e| format!("准备文件事实写入失败: {e}"))?;
+
+            for fact in facts {
+                stmt.execute(params![
+                    fact.id,
+                    fact.folder_id,
+                    fact.path,
+                    fact.normalized_path,
+                    fact.name,
+                    fact.extension,
+                    fact.asset_type,
+                    fact.mime,
+                    fact.size as i64,
+                    fact.mtime_ns,
+                    fact.volume_id,
+                    fact.file_id,
+                    fact.width,
+                    fact.height,
+                    fact.metadata_status,
+                    now,
+                    fact.generation,
+                ])
+                .map_err(|e| format!("写入 normalized_path={} 失败: {e}", fact.normalized_path))?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO asset_user_state(asset_id, updated_at) VALUES (?1, ?2)",
+                    params![fact.id, now],
+                )
+                .map_err(|e| format!("初始化用户状态失败: {e}"))?;
+            }
+        }
+        tx.commit().map_err(|e| format!("提交文件事实失败: {e}"))?;
+        Ok(facts.len())
+    }
+
+    pub fn patch_user_state(&self, patch: &AssetUserPatch) -> Result<MutationSummary, String> {
+        let conn = self.conn.lock();
+        let now = chrono::Utc::now().timestamp_millis();
+        let affected = conn
+            .execute(
+                "UPDATE asset_user_state SET
+                    rating = COALESCE(?2, rating),
+                    favorite = COALESCE(?3, favorite),
+                    color = COALESCE(?4, color),
+                    custom_name = COALESCE(?5, custom_name),
+                    notes = COALESCE(?6, notes),
+                    updated_at = ?7
+                 WHERE asset_id = ?1",
+                params![
+                    patch.asset_id,
+                    patch.rating,
+                    patch.favorite.map(i32::from),
+                    patch.color,
+                    patch.custom_name,
+                    patch.notes,
+                    now,
+                ],
+            )
+            .map_err(|e| format!("更新用户状态失败: {e}"))?;
+        let revision = if affected > 0 {
+            conn.execute(
+                "UPDATE app_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision'",
+                [],
+            )
+            .map_err(|e| format!("更新数据版本失败: {e}"))?;
+            conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM app_meta WHERE key = 'revision'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("读取数据版本失败: {e}"))?
+        } else {
+            0
+        };
+        Ok(MutationSummary { affected, revision })
+    }
+
+    pub fn get_asset_detail(&self, id: &str) -> Result<Option<AssetDetail>, String> {
+        let conn = self.conn.lock();
+        let result = conn.query_row(
+            "SELECT a.id, a.path, a.normalized_path, a.name, a.asset_type, a.size, a.mtime_ns,
+                    COALESCE(u.rating, 0), COALESCE(u.favorite, 0), u.color,
+                    u.custom_name, u.notes, a.record_version
+             FROM assets a
+             LEFT JOIN asset_user_state u ON u.asset_id = a.id
+             WHERE a.id = ?1 AND a.deleted_at IS NULL",
+            params![id],
+            |row| {
+                Ok(AssetDetail {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    normalized_path: row.get(2)?,
+                    name: row.get(3)?,
+                    asset_type: row.get(4)?,
+                    size: row.get::<_, i64>(5)? as u64,
+                    mtime_ns: row.get(6)?,
+                    rating: row.get::<_, i64>(7)? as u8,
+                    favorite: row.get::<_, i64>(8)? != 0,
+                    color: row.get(9)?,
+                    custom_name: row.get(10)?,
+                    notes: row.get(11)?,
+                    record_version: row.get(12)?,
+                })
+            },
+        );
+        match result {
+            Ok(detail) => Ok(Some(detail)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("读取资产详情失败: {e}")),
+        }
+    }
+
+    pub fn table_columns(&self, table: &str) -> Result<Vec<String>, String> {
+        const TABLES: &[&str] = &[
+            "roots",
+            "folders",
+            "assets",
+            "asset_user_state",
+            "tags",
+            "collections",
+            "asset_tags",
+            "asset_collections",
+            "scan_jobs",
+            "file_event_journal",
+            "asset_errors",
+        ];
+        if !TABLES.contains(&table) {
+            return Err(format!("不允许检查未知表: {table}"));
+        }
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| format!("读取表结构失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("查询表结构失败: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("解析表结构失败: {e}"))
     }
 
     // =========================================================================
