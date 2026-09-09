@@ -782,3 +782,20 @@ fn reconciliation_signature_read_errors_are_not_silently_skipped() {
     connection(&dir).execute("UPDATE assets SET mtime_ns='invalid'", []).unwrap();
     assert!(db.get_asset_signatures_under(r"d:\assets").is_err());
 }
+
+#[test]
+fn normal_startup_never_schedules_automatic_full_filesystem_work() {
+    let startup = include_str!("main.rs");
+    assert!(
+        !startup.contains("Duration::from_secs(5)"),
+        "startup must not schedule periodic whole-root reconciliation"
+    );
+    assert!(
+        !startup.contains("validate_db.validate_assets()"),
+        "startup must not validate every cached asset"
+    );
+    assert!(
+        !startup.contains("WindowEvent::Focused(true)"),
+        "window focus must not trigger filesystem reconciliation"
+    );
+}

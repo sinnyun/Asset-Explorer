@@ -49,9 +49,8 @@ fn main() {
             println!("[SingleInstance] 检测到已有 AssetHub 实例正在运行，已唤醒已有窗口，新进程自动退出。");
         }))
         .manage(db.clone())
-        // ====================================================================
-        // 机制 2：启动时自动校验资产有效性并挂载文件监听器
-        // ====================================================================
+        // Startup only opens storage and registers watchers. Expensive filesystem
+        // maintenance is always an explicit, cancellable job.
         .setup(move |app| {
             println!("[Startup] Tauri 应用启动中，开始初始化监控...");
             // 创建全局文件监控注册表，支持运行时动态添加/移除监控文件夹
@@ -66,39 +65,6 @@ fn main() {
                 }
             }
 
-            // 后台周期对账兜底：每 5s 对全部已监控根目录做一次实时递归对账，
-            // 纠正外部工具批量写入或 notify 事件队列可能存在的漏检。
-            let per_app = app_handle.clone();
-            let per_db = db_for_setup.clone();
-            std::thread::spawn(move || {
-                use crate::sync::{reconcile_root, ReconcileMode};
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    if let Ok(folders) = per_db.get_monitored_folders() {
-                        for f in &folders {
-                            let p = std::path::Path::new(&f.path);
-                            if p.exists() && p.is_dir() {
-                                let _ = reconcile_root(&per_app, &per_db, p, ReconcileMode::Deep);
-                            }
-                        }
-                    }
-                }
-            });
-
-            // 资产有效性校验移至后台线程异步执行，不阻塞 Tauri 主线程与首帧渲染
-            // 前端 useAppState 不再调用 validate_assets + 二次 loadWorkspace，
-            // 避免每次启动都做全量数据拉取两次。
-            let validate_db = db_for_setup.clone();
-            std::thread::spawn(move || {
-                match validate_db.validate_assets() {
-                    Ok((total, deleted)) => {
-                        println!("[Startup] 启动资产校验完成: 检查 {} 个资产, 清理了 {} 个无效路径", total, deleted);
-                    }
-                    Err(e) => {
-                        eprintln!("[Startup] 启动资产校验失败: {}", e);
-                    }
-                }
-            });
             println!("[Startup] Tauri 初始化完成，开始监听窗口事件...");
             Ok(())
         })
@@ -113,25 +79,6 @@ fn main() {
                 db.checkpoint();
                 // 终止当前进程及其派生线程，避免僵尸进程遗留
                 std::process::exit(0);
-            }
-            // 窗口重新获得焦点时，做一次廉价剪枝对账兜底，确保用户回到应用后
-            // 界面与磁盘一致（覆盖来自外部资源管理器等在中途的目录增删改）。
-            if let tauri::WindowEvent::Focused(true) = event {
-                if _window.label() == "main" {
-                    let focus_app = _window.app_handle().clone();
-                    let focus_db = db.clone();
-                    std::thread::spawn(move || {
-                        use crate::sync::{reconcile_root, ReconcileMode};
-                        if let Ok(folders) = focus_db.get_monitored_folders() {
-                            for f in &folders {
-                                let p = std::path::Path::new(&f.path);
-                                if p.exists() {
-                                    let _ = reconcile_root(&focus_app, &focus_db, p, ReconcileMode::Pruned);
-                                }
-                            }
-                        }
-                    });
-                }
             }
         })
         .invoke_handler(tauri::generate_handler![
