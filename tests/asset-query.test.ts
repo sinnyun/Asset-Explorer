@@ -6,6 +6,7 @@ import type { AssetSummary } from '../src/types';
 import { readFileSync } from 'node:fs';
 import { ThumbnailMemoryCache } from '../src/services/thumbnailMemoryCache';
 import { calculateVirtualRange } from '../src/components/virtualRange';
+import { initialSplitState, splitViewReducer } from '../src/components/splitViewState';
 
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({
@@ -134,4 +135,16 @@ test('virtual range is clamped and renders only viewport plus overscan', () => {
   });
   assert.equal(end.endIndex, 12);
   assert.ok(end.startIndex >= 0);
+});
+
+test('split workspace keeps independent query state per column', () => {
+  const initial = initialSplitState('left-root', 'right-root');
+  const leftChanged = splitViewReducer(initial, { type: 'search', column: 'left', value: 'photo' });
+  assert.equal(leftChanged.left.search, 'photo');
+  assert.equal(leftChanged.right.search, '');
+  assert.equal(leftChanged.right.folderId, 'right-root');
+
+  const rightChanged = splitViewReducer(leftChanged, { type: 'folder', column: 'right', value: 'right-child' });
+  assert.equal(rightChanged.left.folderId, 'left-root');
+  assert.equal(rightChanged.right.folderId, 'right-child');
 });

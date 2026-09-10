@@ -47,9 +47,9 @@ export function MainArea({
   onSortChange,
   onSearchSubmit,
   onContextMenuAsset,
-  onContextMenuFolder,
+  onContextMenuFolder: _onContextMenuFolder,
   onContextMenuCanvas,
-  onSelectFolder,
+  onSelectFolder: _onSelectFolder,
   onAddMonitoredFolder,
   onPreviewAsset,
 }: MainAreaProps) {
@@ -124,12 +124,9 @@ export function MainArea({
       {splitView ? (
         <MonitoredSplitView
           folders={state.folders}
-          assets={state.assets}
           selectedItems={state.selectedItems}
           onToggleSelection={onToggleSelection}
           onContextMenuAsset={onContextMenuAsset}
-          onContextMenuFolder={onContextMenuFolder}
-          onSelectFolder={id => onSelectFolder?.(id)}
           onPreviewAsset={onPreviewAsset}
         />
       ) : (
