@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { 
   X, Database, Monitor, FolderSync, RefreshCw, HardDrive, 
-  ArrowRight, CheckCircle2, AlertTriangle, Loader2, Sparkles 
+  ArrowRight, CheckCircle2, AlertTriangle, Loader2, Sparkles, FolderOpen
 } from 'lucide-react';
 import { formatBytes } from '../lib/utils';
 import { dataService } from '../services/dataService';
-import { confirm } from '@tauri-apps/plugin-dialog';
+import { confirm, open } from '@tauri-apps/plugin-dialog';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -67,6 +67,23 @@ export function SettingsModal({ isOpen, onClose, onUpdateTheme, onRelocatePaths 
       alert('迁移失败: ' + String(err));
       setIsMigrating(false);
       setMigrationStatus('');
+    }
+  };
+
+  const handleChooseMigrationDirectory = async () => {
+    if (isMigrating) return;
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: '选择新的 AssetHub 数据存储目录',
+      });
+      if (typeof selected === 'string' && selected.trim()) {
+        setMigrationTargetPath(selected);
+      }
+    } catch (error) {
+      console.warn('[Settings] 选择迁移目录失败:', error);
     }
   };
 
@@ -169,14 +186,25 @@ export function SettingsModal({ isOpen, onClose, onUpdateTheme, onRelocatePaths 
 
                   <div className="space-y-1.5 pt-1">
                     <label className="text-xs font-semibold text-neutral-300">目标新存储目录路径</label>
-                    <input
-                      type="text"
-                      value={migrationTargetPath}
-                      onChange={(e) => setMigrationTargetPath(e.target.value)}
-                      disabled={isMigrating}
-                      placeholder="例如: D:\AssetHub_Data 或 E:\AppData\AssetHub"
-                      className="w-full bg-[#141414] border border-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-200 font-mono focus:outline-none focus:border-blue-500"
-                    />
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={migrationTargetPath}
+                        onChange={(e) => setMigrationTargetPath(e.target.value)}
+                        disabled={isMigrating}
+                        placeholder="例如: D:\AssetHub_Data 或 E:\AppData\AssetHub"
+                        className="min-w-0 flex-1 bg-[#141414] border border-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-200 font-mono focus:outline-none focus:border-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleChooseMigrationDirectory}
+                        disabled={isMigrating}
+                        className="shrink-0 px-3 rounded-lg border border-neutral-700 bg-neutral-800 text-neutral-300 hover:bg-neutral-700 hover:text-white transition-colors disabled:opacity-50"
+                        title="选择文件夹"
+                      >
+                        <FolderOpen size={15} />
+                      </button>
+                    </div>
                   </div>
 
                   {isMigrating && (
