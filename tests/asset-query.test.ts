@@ -11,7 +11,6 @@ import { captureScrollPosition } from '../src/components/scrollPosition';
 import { buildGroupedAssetItems } from '../src/components/groupedAssetModel';
 import type { Asset, Folder } from '../src/types';
 import { collectFolderSubtreeIds, folderSummaryToFolder, mergeFolderSummaries } from '../src/services/folderTree';
-import { filterFoldersByDepth } from '../src/services/folderCardDepth';
 
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({
@@ -176,18 +175,6 @@ test('folder summaries are converted into and merged with the sidebar folder cac
   assert.deepEqual(merged[0].tags, []);
 });
 
-test('folder card depth filters relative to the current folder context', () => {
-  const folders = [
-    { id: 'root', name: 'Root', path: 'D:/Root', parentId: undefined },
-    { id: 'category', name: 'Category', path: 'D:/Root/Category', parentId: 'root' },
-    { id: 'project', name: 'Project', path: 'D:/Root/Category/Project', parentId: 'category' },
-    { id: 'inside', name: 'Inside', path: 'D:/Root/Category/Project/Inside', parentId: 'project' },
-  ].map(folder => ({ ...folder, isMonitored: false, tags: [], collections: [] }));
-  assert.deepEqual(filterFoldersByDepth(folders, undefined, 2).map(folder => folder.id), ['root', 'category']);
-  assert.deepEqual(filterFoldersByDepth(folders, 'project', 1).map(folder => folder.id), ['inside']);
-  assert.deepEqual(filterFoldersByDepth(folders, undefined, Infinity).map(folder => folder.id), ['root', 'category', 'project', 'inside']);
-});
-
 test('removing a folder also removes its loaded descendant state', () => {
   const folders = [
     groupedFolder('root', 'D:/Root'),
@@ -204,19 +191,6 @@ test('main workspace wires folder results into the folder view', () => {
   assert.doesNotMatch(appSource, /const filteredFolders: import\('\.\/types'\)\.Folder\[\] = \[\];/);
   assert.match(mainSource, /filteredFolders/);
   assert.match(mainSource, /onContextMenuFolder/);
-});
-
-test('middle folder cards expose numeric depth controls without changing the sidebar tree', () => {
-  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const mainSource = readFileSync(new URL('../src/components/MainArea.tsx', import.meta.url), 'utf8');
-  const sidebarSource = readFileSync(new URL('../src/components/sidebar/FolderRender.tsx', import.meta.url), 'utf8');
-  assert.match(appSource, /folderCardDepth/);
-  assert.match(appSource, /filterFoldersByDepth/);
-  assert.match(mainSource, /folderCardDepth/);
-  assert.match(mainSource, /aria-label="文件夹卡片显示层级"/);
-  assert.match(mainSource, /\{\[1, 2, 3, 4, 5, 6, 7, 8\]/);
-  assert.match(mainSource, /∞/);
-  assert.doesNotMatch(sidebarSource, /folderCardDepth/);
 });
 
 test('asset query contract carries tag and collection ids for cards', () => {
@@ -291,16 +265,4 @@ test('grouped cards keep the legacy tag and collection badge treatment', () => {
   assert.match(source, /bg-amber-500\/10/);
   assert.match(source, /asset\.collections\.length - 1/);
   assert.match(source, /无标签/);
-});
-
-test('scan progress exposes phase, rate, and remaining-time details', () => {
-  const monitorSource = readFileSync(new URL('../src/hooks/useScanMonitor.ts', import.meta.url), 'utf8');
-  const barSource = readFileSync(new URL('../src/components/ScanProgressBar.tsx', import.meta.url), 'utf8');
-  const commandSource = readFileSync(new URL('../src-tauri/src/commands.rs', import.meta.url), 'utf8');
-  assert.match(monitorSource, /ratePerSecond/);
-  assert.match(monitorSource, /etaSeconds/);
-  assert.match(barSource, /phase/);
-  assert.match(barSource, /预计剩余/);
-  assert.match(commandSource, /ratePerSecond/);
-  assert.match(commandSource, /etaSeconds/);
 });

@@ -160,7 +160,6 @@ fn start_scan_job(
         let emit_handle = app_handle.clone();
 
         let mut scan_identity: Option<(String, i64)> = None;
-        let scan_started_at = std::time::Instant::now();
         let mut last_progress = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_millis(200))
             .unwrap_or_else(std::time::Instant::now);
@@ -175,10 +174,7 @@ fn start_scan_job(
                         let _ = emit_handle.emit("scan:started", serde_json::json!({
                             "rootId": root.id,
                             "path": root.path,
-                            "folderName": root.name,
                             "generation": generation,
-                            "phase": "discovering",
-                            "total": 0,
                         }));
                     }
                     ScanBatch::Folders(folders) => {
@@ -193,14 +189,8 @@ fn start_scan_job(
                     }
                     ScanBatch::Progress(done) => {
                         if last_progress.elapsed() >= std::time::Duration::from_millis(200) {
-                            let elapsed = scan_started_at.elapsed().as_secs_f64();
-                            let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
                             let _ = emit_handle.emit("scan:progress", serde_json::json!({
                                 "done": done,
-                                "total": 0,
-                                "phase": "indexing",
-                                "ratePerSecond": rate,
-                                "etaSeconds": serde_json::Value::Null,
                             }));
                             last_progress = std::time::Instant::now();
                         }
@@ -214,8 +204,6 @@ fn start_scan_job(
                             "totalFilesScanned": summary.total_files_scanned,
                             "totalDurationMs": summary.total_duration_ms,
                             "removedStaleAssets": removed,
-                            "phase": "finished",
-                            "total": summary.total_files_scanned,
                         }));
                     }
                 }
