@@ -23,6 +23,7 @@ import { collectionRouter } from './src/server/collectionRouter';
 import { assetRouter } from './src/server/assetRouter';
 import { smartFolderRouter } from './src/server/smartFolderRouter';
 import { storageRouter } from './src/server/storageRouter';
+import { v2Router } from './src/server/v2Router';
 
 async function startServer() {
   const app = express();
@@ -43,6 +44,7 @@ async function startServer() {
   app.use('/api', assetRouter);
   app.use('/api', smartFolderRouter);
   app.use('/api', storageRouter);
+  app.use('/api', v2Router);
 
   // ==========================================================================
   // Vite 开发/生产中间件

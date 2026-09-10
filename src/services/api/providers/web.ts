@@ -259,14 +259,19 @@ class WebApiProvider implements ApiProvider {
   // ------------------------------------------------------------------------
 
   async setAssetRating(id: string, rating: number): Promise<void> {
-    await apiRequest(`/api/assets/${id}/rating`, {
+    const response = await apiRequest(`/api/assets/${id}/rating`, {
       method: 'PATCH',
       body: JSON.stringify({ rating }),
     });
+    if (!response.success) throw new Error(response.error || 'Failed to update rating');
   }
 
-  async setAssetFavorite(_id: string, _favorite: boolean): Promise<void> {
-    // Web schema 暂无收藏字段，保留接口兼容
+  async setAssetFavorite(id: string, favorite: boolean): Promise<void> {
+    const response = await apiRequest(`/api/assets/${id}/favorite`, {
+      method: 'PATCH',
+      body: JSON.stringify({ favorite }),
+    });
+    if (!response.success) throw new Error(response.error || 'Failed to update favorite');
   }
 
   async deleteAssets(ids: string[]): Promise<void> {
