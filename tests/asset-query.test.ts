@@ -5,6 +5,7 @@ import { AssetPageCache } from '../src/services/api/assetQueryCache';
 import type { AssetSummary } from '../src/types';
 import { readFileSync } from 'node:fs';
 import { ThumbnailMemoryCache } from '../src/services/thumbnailMemoryCache';
+import { calculateVirtualRange } from '../src/components/virtualRange';
 
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({
@@ -105,4 +106,32 @@ test('thumbnail component requests work only near the viewport', () => {
   const source = readFileSync(new URL('../src/components/ThumbnailImage.tsx', import.meta.url), 'utf8');
   assert.match(source, /IntersectionObserver/);
   assert.match(source, /rootMargin/);
+});
+
+test('virtual range is clamped and renders only viewport plus overscan', () => {
+  assert.deepEqual(calculateVirtualRange({
+    itemCount: 10_000,
+    columnCount: 5,
+    rowHeight: 200,
+    viewportHeight: 600,
+    scrollOffset: 10_000,
+    overscanRows: 2,
+  }), {
+    startRow: 48,
+    endRow: 55,
+    startIndex: 240,
+    endIndex: 275,
+    totalRows: 2_000,
+  });
+
+  const end = calculateVirtualRange({
+    itemCount: 12,
+    columnCount: 4,
+    rowHeight: 100,
+    viewportHeight: 250,
+    scrollOffset: 99_999,
+    overscanRows: 4,
+  });
+  assert.equal(end.endIndex, 12);
+  assert.ok(end.startIndex >= 0);
 });
