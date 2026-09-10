@@ -4,6 +4,7 @@ import type { Asset } from '../types';
 import { cn, formatBytes } from '../lib/utils';
 import { ThumbnailImage } from './ThumbnailImage';
 import { calculateVirtualRange } from './virtualRange';
+import { captureScrollPosition } from './scrollPosition';
 
 interface Props {
   assets: Asset[];
@@ -57,7 +58,7 @@ export function VirtualAssetGrid({ assets, selectedIds, loading, hasNextPage, on
     <div
       ref={viewportRef}
       className="h-full overflow-y-auto custom-scrollbar"
-      onScroll={event => setViewport(current => ({ ...current, scrollTop: event.currentTarget.scrollTop }))}
+      onScroll={event => captureScrollPosition(setViewport, event)}
     >
       <div className="relative" style={{ height: range.totalRows * rowHeight }}>
         {assets.slice(range.startIndex, range.endIndex).map((asset, offset) => {
