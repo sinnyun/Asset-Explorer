@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { AssetState } from '../types';
 import { runtime } from '../services/api';
@@ -26,13 +26,16 @@ const idleProgress: ScanProgress = {
 
 export function useScanMonitor(setState: Dispatch<SetStateAction<AssetState>>) {
   const [progress, setProgress] = useState<ScanProgress>(idleProgress);
+  const folderRefreshGeneration = useRef(0);
 
   const refreshFolderCache = async () => {
+    const generation = ++folderRefreshGeneration.current;
     try {
       const [shell, rootPage] = await Promise.all([
         dataService.getWorkspaceShell(),
         dataService.queryFolders({ limit: 300 }),
       ]);
+      if (generation !== folderRefreshGeneration.current) return;
       setState(previous => ({
         ...previous,
         folders: mergeFolderSummaries(shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })), rootPage.items),

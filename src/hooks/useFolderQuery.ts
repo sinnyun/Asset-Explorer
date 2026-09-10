@@ -60,7 +60,11 @@ export function useFolderQuery(input: FolderQuery) {
         clearTimeout(timer);
         timer = setTimeout(refresh, 120);
       };
-      stop = await listen('scan:started', invalidate);
+      const stops = await Promise.all([
+        listen('scan:started', invalidate),
+        listen('scan:finished', invalidate),
+      ]);
+      stop = () => stops.forEach(unlisten => unlisten());
       if (disposed) stop();
     }).catch(() => undefined);
     return () => {

@@ -57,7 +57,7 @@ export function renderFolderTree(
     if (children.length === 0) return null;
 
     return children.map(folder => {
-      const hasChildren = (childrenMap.get(folder.id) || []).length > 0;
+      const hasChildren = Boolean(folder.hasChildren) || (childrenMap.get(folder.id) || []).length > 0;
       const isExpanded = state.expandedFolderIds.includes(folder.id);
       const directCount = folderCounts.get(folder.id);
       

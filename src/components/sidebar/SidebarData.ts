@@ -92,8 +92,11 @@ export function useSidebarData(
 
   const folderCounts = useMemo(() => {
     const map = new Map<string, number>();
+    for (const folder of state.folders) {
+      if (folder.assetCount !== undefined) map.set(folder.id, folder.assetCount);
+    }
     for (const a of state.assets) {
-      map.set(a.folderId, (map.get(a.folderId) || 0) + 1);
+      if (!map.has(a.folderId)) map.set(a.folderId, 1);
     }
     return map;
   }, [state.assets]);

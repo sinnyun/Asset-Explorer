@@ -71,6 +71,8 @@ export interface Folder {
   description?: string;
   isPinned?: boolean;
   order?: number;
+  assetCount?: number;
+  hasChildren?: boolean;
 }
 
 export type SidebarTab = 'folders' | 'smart' | 'tags' | 'collections';

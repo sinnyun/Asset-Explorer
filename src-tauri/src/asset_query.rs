@@ -37,6 +37,28 @@ fn attach_asset_relations(conn: &rusqlite::Connection, items: &mut [AssetSummary
     Ok(())
 }
 
+fn attach_detail_relations(conn: &rusqlite::Connection, items: &mut [AssetDetail]) -> Result<(), String> {
+    if items.is_empty() { return Ok(()); }
+    let ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let load = |table: &str, column: &str| -> Result<HashMap<String, Vec<String>>, String> {
+        let sql = format!("SELECT asset_id, {column} FROM {table} WHERE asset_id IN ({placeholders}) ORDER BY asset_id, {column}");
+        let mut statement = conn.prepare(&sql).map_err(|e| format!("准备资产关系查询失败: {e}"))?;
+        let rows = statement.query_map(params_from_iter(ids.iter()), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("读取资产关系失败: {e}"))?;
+        let mut result = HashMap::new();
+        for row in rows { let (asset_id, relation_id) = row.map_err(|e| format!("读取资产关系行失败: {e}"))?; result.entry(asset_id).or_insert_with(Vec::new).push(relation_id); }
+        Ok(result)
+    };
+    let tags = load("asset_tags", "tag_id")?;
+    let collections = load("asset_collections", "collection_id")?;
+    for item in items {
+        item.tag_ids = tags.get(&item.id).cloned().unwrap_or_default();
+        item.collection_ids = collections.get(&item.id).cloned().unwrap_or_default();
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetCursor {
     sort: AssetSort,
@@ -337,13 +359,17 @@ impl Database {
                         color: row.get(9)?,
                         custom_name: row.get(10)?,
                         notes: row.get(11)?,
+                        tag_ids: Vec::new(),
+                        collection_ids: Vec::new(),
                         record_version: row.get(12)?,
                     })
                 })
                 .map_err(|e| format!("执行资产详情查询失败: {e}"))?;
-            let by_id = rows
+            let mut details = rows
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| format!("读取资产详情失败: {e}"))?
+                .map_err(|e| format!("读取资产详情失败: {e}"))?;
+            attach_detail_relations(conn, &mut details)?;
+            let by_id = details
                 .into_iter()
                 .map(|detail| (detail.id.clone(), detail))
                 .collect::<std::collections::HashMap<_, _>>();

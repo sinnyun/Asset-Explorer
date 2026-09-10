@@ -11,6 +11,8 @@ interface MainAreaProps {
   filteredAssets: Asset[];
   filteredFolders: Folder[];
   folderLoading: boolean;
+  folderHasNextPage: boolean;
+  onLoadNextFolderPage: () => void;
   queryLoading: boolean;
   queryError: string | null;
   hasNextPage: boolean;
@@ -36,6 +38,8 @@ export function MainArea({
   filteredAssets,
   filteredFolders,
   folderLoading,
+  folderHasNextPage,
+  onLoadNextFolderPage,
   queryLoading,
   queryError,
   hasNextPage,
@@ -134,6 +138,8 @@ export function MainArea({
           onToggleSelection={onToggleSelection}
           onContextMenuAsset={onContextMenuAsset}
           onPreviewAsset={onPreviewAsset}
+          tagLabels={tagLabels}
+          collectionLabels={collectionLabels}
         />
       ) : (
         <section className="relative flex-1 min-h-0 p-4" onContextMenu={onContextMenuCanvas}>
@@ -175,10 +181,11 @@ export function MainArea({
                           <div className="truncate text-sm font-medium text-neutral-200" title={folder.name}>{folder.name}</div>
                           <div className="truncate text-[11px] text-neutral-500" title={folder.path}>{folder.path}</div>
                         </div>
-                        <span className="shrink-0 text-[11px] text-neutral-500">打开</span>
+                        <span className="shrink-0 text-[11px] text-neutral-500">{folder.assetCount ?? 0} 项</span>
                       </div>
                     );
                   })}
+                  {folderHasNextPage && <button onClick={event => { event.stopPropagation(); onLoadNextFolderPage(); }} className="col-span-full rounded-md border border-dashed border-neutral-700 py-2 text-xs text-neutral-400 hover:border-blue-500 hover:text-blue-400">加载更多文件夹</button>}
                 </div>
               )}
               {filteredAssets.length > 0 ? (

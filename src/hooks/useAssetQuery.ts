@@ -68,14 +68,19 @@ export function useAssetQuery(input: AssetQuery) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let unlisten: Array<() => void> = [];
     import('@tauri-apps/api/event').then(async ({ listen }) => {
-      const invalidate = () => {
+    const invalidate = () => {
         if (disposed) return;
-        clearTimeout(timer);
-        timer = setTimeout(refresh, 80);
+        // Throttle invalidations during scans. File events can arrive many times
+        // per second; one bounded refresh window keeps the UI live without
+        // turning every event into another SQLite/HTTP page query.
+        if (timer) return;
+        timer = setTimeout(() => {
+          timer = undefined;
+          refresh();
+        }, 500);
       };
       unlisten = await Promise.all([
         listen('query:invalidated', invalidate),
-        listen('scan:progress', invalidate),
         listen('scan:finished', invalidate),
         listen('asset:added', invalidate),
         listen('asset:modified', invalidate),

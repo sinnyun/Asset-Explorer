@@ -12,6 +12,8 @@ interface MonitoredSplitViewProps {
   onToggleSelection: (id: string, type: 'asset' | 'folder', multi: boolean) => void;
   onContextMenuAsset: (event: React.MouseEvent, id: string) => void;
   onPreviewAsset?: (asset: Asset) => void;
+  tagLabels?: Map<string, string>;
+  collectionLabels?: Map<string, string>;
 }
 
 function toAsset(item: AssetSummary): Asset {
@@ -25,8 +27,8 @@ function toAsset(item: AssetSummary): Asset {
     folderId: item.folderId ?? '',
     dateModified,
     dateAdded: dateModified,
-    tags: [],
-    collections: [],
+    tags: item.tagIds ?? [],
+    collections: item.collectionIds ?? [],
     width: item.width,
     height: item.height,
   };
@@ -59,7 +61,7 @@ interface ColumnProps {
   onPreviewAsset?: MonitoredSplitViewProps['onPreviewAsset'];
 }
 
-function SplitColumn({ id, title, root, state, dispatch, selectedIds, onToggleSelection, onContextMenuAsset, onPreviewAsset }: ColumnProps) {
+function SplitColumn({ id, title, root, state, dispatch, selectedIds, onToggleSelection, onContextMenuAsset, onPreviewAsset, tagLabels, collectionLabels }: ColumnProps & Pick<MonitoredSplitViewProps, 'tagLabels' | 'collectionLabels'>) {
   const [draftSearch, setDraftSearch] = React.useState('');
   const children = useFolderChildren(root?.id);
   const query = useAssetQuery({
@@ -116,6 +118,8 @@ function SplitColumn({ id, title, root, state, dispatch, selectedIds, onToggleSe
             onToggleSelection={(assetId, multi) => onToggleSelection(assetId, 'asset', multi)}
             onContextMenu={onContextMenuAsset}
             onPreview={onPreviewAsset}
+            tagLabels={tagLabels}
+            collectionLabels={collectionLabels}
           />
         )}
       </div>
@@ -123,7 +127,7 @@ function SplitColumn({ id, title, root, state, dispatch, selectedIds, onToggleSe
   );
 }
 
-export function MonitoredSplitView({ folders, selectedItems, onToggleSelection, onContextMenuAsset, onPreviewAsset }: MonitoredSplitViewProps) {
+export function MonitoredSplitView({ folders, selectedItems, onToggleSelection, onContextMenuAsset, onPreviewAsset, tagLabels, collectionLabels }: MonitoredSplitViewProps) {
   const roots = React.useMemo(() => {
     const monitored = folders.filter(folder => folder.isMonitored);
     return monitored.length > 0 ? monitored : folders.filter(folder => !folder.parentId);
@@ -138,8 +142,8 @@ export function MonitoredSplitView({ folders, selectedItems, onToggleSelection, 
 
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 gap-px overflow-hidden bg-neutral-800 lg:grid-cols-2">
-      <SplitColumn id="left" title="工作区 A" root={roots[0]} state={state.left} dispatch={dispatch} selectedIds={selectedIds} onToggleSelection={onToggleSelection} onContextMenuAsset={onContextMenuAsset} onPreviewAsset={onPreviewAsset} />
-      <SplitColumn id="right" title="工作区 B" root={roots[1] ?? roots[0]} state={state.right} dispatch={dispatch} selectedIds={selectedIds} onToggleSelection={onToggleSelection} onContextMenuAsset={onContextMenuAsset} onPreviewAsset={onPreviewAsset} />
+      <SplitColumn id="left" title="工作区 A" root={roots[0]} state={state.left} dispatch={dispatch} selectedIds={selectedIds} onToggleSelection={onToggleSelection} onContextMenuAsset={onContextMenuAsset} onPreviewAsset={onPreviewAsset} tagLabels={tagLabels} collectionLabels={collectionLabels} />
+      <SplitColumn id="right" title="工作区 B" root={roots[1] ?? roots[0]} state={state.right} dispatch={dispatch} selectedIds={selectedIds} onToggleSelection={onToggleSelection} onContextMenuAsset={onContextMenuAsset} onPreviewAsset={onPreviewAsset} tagLabels={tagLabels} collectionLabels={collectionLabels} />
     </div>
   );
 }

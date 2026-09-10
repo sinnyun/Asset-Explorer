@@ -102,6 +102,10 @@ pub struct AssetDetail {
     #[serde(rename = "customName")]
     pub custom_name: Option<String>,
     pub notes: Option<String>,
+    #[serde(rename = "tagIds")]
+    pub tag_ids: Vec<String>,
+    #[serde(rename = "collectionIds")]
+    pub collection_ids: Vec<String>,
     #[serde(rename = "recordVersion")]
     pub record_version: i64,
 }

@@ -940,6 +940,8 @@ impl Database {
                     color: row.get(9)?,
                     custom_name: row.get(10)?,
                     notes: row.get(11)?,
+                    tag_ids: Vec::new(),
+                    collection_ids: Vec::new(),
                     record_version: row.get(12)?,
                 })
             },

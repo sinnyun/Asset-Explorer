@@ -189,3 +189,13 @@ test('asset query contract carries tag and collection ids for cards', () => {
   assert.match(routerSource, /assetTags/);
   assert.match(routerSource, /assetCollections/);
 });
+
+test('folder and split views preserve compact metadata', () => {
+  const treeSource = readFileSync(new URL('../src/components/sidebar/FolderRender.tsx', import.meta.url), 'utf8');
+  const splitSource = readFileSync(new URL('../src/components/MonitoredSplitView.tsx', import.meta.url), 'utf8');
+  const querySource = readFileSync(new URL('../src/hooks/useAssetQuery.ts', import.meta.url), 'utf8');
+  assert.match(treeSource, /folder\.hasChildren/);
+  assert.match(splitSource, /item\.tagIds/);
+  assert.match(splitSource, /tagLabels/);
+  assert.doesNotMatch(querySource, /listen\('scan:progress', invalidate\)/);
+});

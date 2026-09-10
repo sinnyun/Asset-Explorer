@@ -10,6 +10,8 @@ export function folderSummaryToFolder(summary: FolderSummary): Folder {
     isMonitored: summary.isMonitored,
     tags: [],
     collections: [],
+    assetCount: summary.assetCount,
+    hasChildren: summary.hasChildren,
   };
 }
 

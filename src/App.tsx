@@ -255,6 +255,8 @@ export default function App() {
         filteredAssets={filteredAssets} 
         filteredFolders={filteredFolders}
         folderLoading={folderResults.loading}
+        folderHasNextPage={folderResults.hasNextPage}
+        onLoadNextFolderPage={folderResults.loadNextPage}
         queryLoading={assetResults.loading}
         queryError={assetResults.error}
         hasNextPage={assetResults.hasNextPage}
