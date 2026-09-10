@@ -12,7 +12,7 @@ use crate::models::{
 #[cfg(test)]
 use crate::models::AssetDetail;
 use parking_lot::{Condvar, Mutex};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -584,6 +584,124 @@ impl Database {
             revision_after_mutation(&tx, facts.len())?;
             tx.commit().map_err(|e| format!("提交文件事实失败: {e}"))?;
             Ok(facts.len())
+        })
+    }
+
+    pub fn begin_root_scan(&self, root: &Folder) -> Result<i64, String> {
+        let root = root.clone();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let generation: i64 = tx.query_row(
+                "INSERT INTO roots(id, name, path, normalized_path, online, dirty, active_generation, completed_generation, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, 0, 1, 0, ?5, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name, path=excluded.path, normalized_path=excluded.normalized_path,
+                    online=1, active_generation=roots.active_generation + 1, updated_at=excluded.updated_at
+                 RETURNING active_generation",
+                params![root.id, root.name, root.path, normalize_windows_path(&root.path), now],
+                |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            Self::write_folder(&tx, &root)?;
+            tx.execute(
+                "UPDATE folders SET root_id=?1, last_seen_generation=?2 WHERE id=?1",
+                params![root.id, generation],
+            ).map_err(|error| error.to_string())?;
+            revision_after_mutation(&tx, 1)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(generation)
+        })
+    }
+
+    pub fn upsert_scan_file_facts(
+        &self,
+        root_id: &str,
+        generation: i64,
+        facts: &[FileFact],
+    ) -> Result<usize, String> {
+        let root_id = root_id.to_string();
+        let mut facts = facts.to_vec();
+        for fact in &mut facts {
+            fact.generation = generation;
+        }
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            Self::write_file_facts(&tx, &facts)?;
+            let changed = facts.len();
+            for fact in &facts {
+                tx.execute(
+                    "UPDATE assets SET root_id=?1, last_seen_generation=?2 WHERE id=?3",
+                    params![root_id, generation, fact.id],
+                ).map_err(|error| error.to_string())?;
+            }
+            revision_after_mutation(&tx, changed)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(changed)
+        })
+    }
+
+    pub fn upsert_scan_assets(
+        &self,
+        root_id: &str,
+        generation: i64,
+        assets: &[Asset],
+    ) -> Result<usize, String> {
+        let facts = assets.iter().map(scan_file_fact).collect::<Result<Vec<_>, _>>()?;
+        self.upsert_scan_file_facts(root_id, generation, &facts)
+    }
+
+    pub fn upsert_scan_folders(
+        &self,
+        root_id: &str,
+        generation: i64,
+        folders: &[Folder],
+    ) -> Result<usize, String> {
+        let root_id = root_id.to_string();
+        let folders = folders.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            for folder in &folders {
+                Self::write_folder(&tx, folder)?;
+                tx.execute(
+                    "UPDATE folders SET root_id=?1, last_seen_generation=?2 WHERE id=?3",
+                    params![root_id, generation, folder.id],
+                ).map_err(|error| error.to_string())?;
+            }
+            let changed = folders.len();
+            revision_after_mutation(&tx, changed)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(changed)
+        })
+    }
+
+    pub fn complete_root_scan(&self, root_id: &str, generation: i64) -> Result<usize, String> {
+        let root_id = root_id.to_string();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let active: Option<i64> = tx.query_row(
+                "SELECT active_generation FROM roots WHERE id=?1",
+                [&root_id],
+                |row| row.get(0),
+            ).optional().map_err(|error| error.to_string())?;
+            if active != Some(generation) {
+                return Err("scan generation is no longer active".to_string());
+            }
+            let removed = tx.execute(
+                "UPDATE assets SET deleted_at=?1, record_version=record_version+1
+                 WHERE root_id=?2 AND last_seen_generation<>?3 AND deleted_at IS NULL",
+                params![chrono::Utc::now().timestamp_millis(), root_id, generation],
+            ).map_err(|error| error.to_string())?;
+            let removed_folders = tx.execute(
+                "DELETE FROM folders WHERE root_id=?1 AND id<>?1 AND last_seen_generation<>?2",
+                params![root_id, generation],
+            ).map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE roots SET completed_generation=?2, dirty=0, updated_at=?3 WHERE id=?1",
+                params![root_id, generation, chrono::Utc::now().timestamp_millis()],
+            ).map_err(|error| error.to_string())?;
+            revision_after_mutation(&tx, removed + removed_folders)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(removed)
         })
     }
 

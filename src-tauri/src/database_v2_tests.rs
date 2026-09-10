@@ -1071,3 +1071,63 @@ fn thumbnail_queue_refuses_work_above_its_hard_limit() {
     drop(reservations);
     assert_eq!(coordinator.queued(), 0);
 }
+
+#[test]
+fn completed_scan_generation_prunes_only_unseen_file_facts_and_preserves_user_state() {
+    let (dir, db) = test_db("scan-generation");
+    let root = folder("root", r"D:\assets");
+    let first = db.begin_root_scan(&root).unwrap();
+    let a = fact("a", r"D:\assets\a.png", 100, 10);
+    let b = fact("b", r"D:\assets\b.png", 100, 10);
+    db.upsert_scan_file_facts(&root.id, first, &[a.clone(), b.clone()]).unwrap();
+    db.complete_root_scan(&root.id, first).unwrap();
+    db.patch_user_state(&AssetUserPatch::rating("a", 5)).unwrap();
+
+    let second = db.begin_root_scan(&root).unwrap();
+    db.upsert_scan_file_facts(&root.id, second, &[b]).unwrap();
+    let removed = db.complete_root_scan(&root.id, second).unwrap();
+    assert_eq!(removed, 1);
+    assert!(db.get_asset_detail("a").unwrap().is_none());
+    assert_eq!(number(&connection(&dir), "SELECT count(*) FROM asset_user_state WHERE asset_id='a' AND rating=5"), 1);
+}
+
+#[test]
+fn unfinished_scan_generation_never_prunes_cached_rows() {
+    let (_dir, db) = test_db("scan-generation-cancel");
+    let root = folder("root", r"D:\assets");
+    let first = db.begin_root_scan(&root).unwrap();
+    db.upsert_scan_file_facts(&root.id, first, &[fact("a", r"D:\assets\a.png", 100, 10)]).unwrap();
+    db.complete_root_scan(&root.id, first).unwrap();
+
+    let _interrupted = db.begin_root_scan(&root).unwrap();
+    assert!(db.get_asset_detail("a").unwrap().is_some());
+}
+
+#[test]
+fn scan_generation_tracks_folder_batches_and_prunes_stale_folders_on_completion() {
+    let (dir, db) = test_db("scan-folder-generation");
+    let root = folder("root", r"D:\assets");
+    let child = folder("child", r"D:\assets\child");
+    let first = db.begin_root_scan(&root).unwrap();
+    db.upsert_scan_folders(&root.id, first, &[child]).unwrap();
+    db.complete_root_scan(&root.id, first).unwrap();
+    assert_eq!(number(&connection(&dir), "SELECT count(*) FROM folders WHERE id='child'"), 1);
+
+    let second = db.begin_root_scan(&root).unwrap();
+    db.complete_root_scan(&root.id, second).unwrap();
+    assert_eq!(number(&connection(&dir), "SELECT count(*) FROM folders WHERE id='child'"), 0);
+}
+
+#[test]
+fn full_scan_command_uses_generation_aware_writes_exclusively() {
+    let commands = include_str!("commands.rs");
+    let start = commands.find("pub async fn start_scan_directory").unwrap();
+    let end = commands[start..].find("pub fn cancel_job_v2").unwrap() + start;
+    let implementation = &commands[start..end];
+    assert!(implementation.contains("begin_root_scan"));
+    assert!(implementation.contains("upsert_scan_folders"));
+    assert!(implementation.contains("upsert_scan_assets"));
+    assert!(implementation.contains("complete_root_scan"));
+    assert!(!implementation.contains("batch_save_scan_results"));
+    assert!(!implementation.contains("batch_save_assets"));
+}

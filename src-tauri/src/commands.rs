@@ -179,7 +179,7 @@ pub async fn start_scan_directory(
     coordinator.start(root_id, move |cancelled| {
         let emit_handle = app_handle.clone();
 
-        let mut root_folder: Option<Folder> = None;
+        let mut scan_identity: Option<(String, i64)> = None;
         let mut last_progress = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_millis(200))
             .unwrap_or_else(std::time::Instant::now);
@@ -189,18 +189,24 @@ pub async fn start_scan_directory(
             &mut |batch| {
                 match batch {
                     ScanBatch::Started(root) => {
-                        db.batch_save_scan_results(&root, &[], &[])?;
+                        let generation = db.begin_root_scan(&root)?;
+                        scan_identity = Some((root.id.clone(), generation));
                         let _ = emit_handle.emit("scan:started", serde_json::json!({
                             "rootId": root.id,
                             "path": root.path,
+                            "generation": generation,
                         }));
-                        root_folder = Some(root);
                     }
                     ScanBatch::Folders(folders) => {
-                        let root = root_folder.as_ref().ok_or("扫描根目录尚未初始化")?;
-                        db.batch_save_scan_results(root, &folders, &[])?;
+                        let (root_id, generation) = scan_identity.as_ref()
+                            .ok_or("扫描根目录尚未初始化")?;
+                        db.upsert_scan_folders(root_id, *generation, &folders)?;
                     }
-                    ScanBatch::Assets(items) => db.batch_save_assets(&items)?,
+                    ScanBatch::Assets(items) => {
+                        let (root_id, generation) = scan_identity.as_ref()
+                            .ok_or("扫描根目录尚未初始化")?;
+                        db.upsert_scan_assets(root_id, *generation, &items)?;
+                    }
                     ScanBatch::Progress(done) => {
                         if last_progress.elapsed() >= std::time::Duration::from_millis(200) {
                             let _ = emit_handle.emit("scan:progress", serde_json::json!({
@@ -210,10 +216,14 @@ pub async fn start_scan_directory(
                         }
                     }
                     ScanBatch::Finished(summary) => {
+                        let (root_id, generation) = scan_identity.as_ref()
+                            .ok_or("扫描根目录尚未初始化")?;
+                        let removed = db.complete_root_scan(root_id, *generation)?;
                         let _ = emit_handle.emit("scan:finished", serde_json::json!({
                             "rootId": summary.root_folder.id,
                             "totalFilesScanned": summary.total_files_scanned,
                             "totalDurationMs": summary.total_duration_ms,
+                            "removedStaleAssets": removed,
                         }));
                     }
                 }
