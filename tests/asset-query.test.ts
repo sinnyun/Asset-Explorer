@@ -8,6 +8,8 @@ import { ThumbnailMemoryCache } from '../src/services/thumbnailMemoryCache';
 import { calculateVirtualRange } from '../src/components/virtualRange';
 import { initialSplitState, splitViewReducer } from '../src/components/splitViewState';
 import { captureScrollPosition } from '../src/components/scrollPosition';
+import { buildGroupedAssetItems } from '../src/components/groupedAssetModel';
+import type { Asset, Folder } from '../src/types';
 import { folderSummaryToFolder, mergeFolderSummaries } from '../src/services/folderTree';
 
 test('asset query clamps page size and removes empty optional values', () => {
@@ -198,4 +200,37 @@ test('folder and split views preserve compact metadata', () => {
   assert.match(splitSource, /item\.tagIds/);
   assert.match(splitSource, /tagLabels/);
   assert.doesNotMatch(querySource, /listen\('scan:progress', invalidate\)/);
+});
+
+function groupedAsset(id: string, folderId: string): Asset {
+  return {
+    id, name: id, path: `D:/${id}`, type: 'image', size: 1, folderId,
+    dateModified: '2026-01-01T00:00:00.000Z', dateAdded: '2026-01-01T00:00:00.000Z',
+    tags: [], collections: [],
+  };
+}
+
+function groupedFolder(id: string, path: string): Folder {
+  return { id, name: id, path, isMonitored: false, tags: [], collections: [] };
+}
+
+test('grouped asset model keeps headers, groups assets, and hides collapsed assets', () => {
+  const items = buildGroupedAssetItems(
+    [groupedAsset('b', 'folder-b'), groupedAsset('a', 'folder-a'), groupedAsset('deep', 'folder-deep'), groupedAsset('unknown', '')],
+    [groupedFolder('folder-b', 'D:/B'), groupedFolder('folder-a', 'D:/A')],
+    ['folder-a'],
+  );
+  assert.deepEqual(items.map(item => item.kind === 'header' ? `${item.kind}:${item.groupId}:${item.assetCount}` : `${item.kind}:${item.asset.id}`), [
+    'header:folder-deep:1', 'asset:deep',
+    'header:folder-a:1',
+    'header:folder-b:1', 'asset:b',
+    'header:__unassigned__:1', 'asset:unknown',
+  ]);
+});
+
+test('main area routes standard assets through the grouped virtual view', () => {
+  const source = readFileSync(new URL('../src/components/MainArea.tsx', import.meta.url), 'utf8');
+  assert.match(source, /VirtualGroupedAssetView/);
+  assert.match(source, /collapsedGroupIds/);
+  assert.match(source, /onToggleGroupCollapse/);
 });

@@ -3,8 +3,8 @@ import { AlertTriangle, Columns2, Folder as FolderIcon, FolderPlus, FolderTree, 
 import type { Asset, AssetState, Folder, SortOption } from '../types';
 import { cn } from '../lib/utils';
 import { MonitoredSplitView } from './MonitoredSplitView';
-import { VirtualAssetGrid } from './VirtualAssetGrid';
-import { VirtualAssetList } from './VirtualAssetList';
+import { VirtualGroupedAssetView } from './VirtualGroupedAssetView';
+import { buildGroupedAssetItems } from './groupedAssetModel';
 
 interface MainAreaProps {
   state: AssetState;
@@ -49,7 +49,7 @@ export function MainArea({
   onChangeView,
   onToggleGroupByFolder: _onToggleGroupByFolder,
   onToggleIncludeSubfolders,
-  onToggleGroupCollapse: _onToggleGroupCollapse,
+  onToggleGroupCollapse,
   onSortChange,
   onSearchSubmit,
   onContextMenuAsset,
@@ -67,19 +67,14 @@ export function MainArea({
   );
   const tagLabels = React.useMemo(() => new Map(state.tags.map(tag => [tag.id, tag.name])), [state.tags]);
   const collectionLabels = React.useMemo(() => new Map(state.collections.map(collection => [collection.id, collection.name])), [state.collections]);
-
-  const virtualProps = {
-    assets: filteredAssets,
-    selectedIds: selectedAssetIds,
-    loading: queryLoading,
-    hasNextPage,
-    onLoadNextPage,
-    onToggleSelection: (id: string, multi: boolean) => onToggleSelection(id, 'asset' as const, multi),
-    onContextMenu: onContextMenuAsset,
-    onPreview: onPreviewAsset,
-    tagLabels,
-    collectionLabels,
-  };
+  const selectedFolderIds = React.useMemo(
+    () => new Set(state.selectedItems.filter(item => item.type === 'folder').map(item => item.id)),
+    [state.selectedItems],
+  );
+  const groupedItems = React.useMemo(
+    () => buildGroupedAssetItems(filteredAssets, state.folders, state.collapsedGroupIds),
+    [filteredAssets, state.collapsedGroupIds, state.folders],
+  );
 
   return (
     <main className="flex-1 min-w-0 flex flex-col bg-[#141414] overflow-hidden" onClick={onClearSelection}>
@@ -190,7 +185,22 @@ export function MainArea({
               )}
               {filteredAssets.length > 0 ? (
                 <div className="min-h-0 flex-1">
-                  {state.viewMode === 'grid' ? <VirtualAssetGrid {...virtualProps} /> : <VirtualAssetList {...virtualProps} />}
+                  <VirtualGroupedAssetView
+                    items={groupedItems}
+                    viewMode={state.viewMode}
+                    selectedAssetIds={selectedAssetIds}
+                    selectedFolderIds={selectedFolderIds}
+                    loading={queryLoading}
+                    hasNextPage={hasNextPage}
+                    onLoadNextPage={onLoadNextPage}
+                    onToggleSelection={onToggleSelection}
+                    onContextMenuAsset={onContextMenuAsset}
+                    onContextMenuFolder={onContextMenuFolder}
+                    onPreviewAsset={onPreviewAsset}
+                    onToggleGroupCollapse={onToggleGroupCollapse}
+                    tagLabels={tagLabels}
+                    collectionLabels={collectionLabels}
+                  />
                 </div>
               ) : folderLoading ? (
                 <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-neutral-400"><Loader2 className="animate-spin" size={18} />正在读取文件夹…</div>
