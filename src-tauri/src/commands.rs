@@ -14,6 +14,7 @@ use crate::models::{
     AggregationReport, Asset, AssetDetail, AssetPage, AssetQuery, Collection, Folder,
     FolderPage, FolderQuery, ScanResult, SmartFolder, Tag, WorkspaceShell,
 };
+use crate::metrics::DiagnosticsSnapshot;
 use crate::thumbnail_cache::generate_or_get_thumbnail;
 use crate::thumbnail_jobs::ThumbnailCoordinator;
 use crate::sync::FolderChangeEvent;
@@ -54,9 +55,12 @@ pub async fn query_assets_v2(
     query: AssetQuery,
 ) -> Result<AssetPage, String> {
     let db = db.inner().clone();
-    tokio::task::spawn_blocking(move || db.query_assets(&query))
+    let started = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(move || db.query_assets(&query))
         .await
-        .map_err(|e| format!("V2 资产查询任务失败: {e}"))?
+        .map_err(|e| format!("V2 资产查询任务失败: {e}"))?;
+    crate::metrics::global().record_query(started.elapsed(), result.is_ok());
+    result
 }
 
 #[tauri::command]
@@ -252,6 +256,20 @@ pub fn get_job_status_v2(
     job_id: String,
 ) -> Result<JobSnapshot, String> {
     coordinator.status(&job_id).ok_or_else(|| format!("未知任务: {job_id}"))
+}
+
+#[tauri::command]
+pub fn get_diagnostics_v2(
+    db: State<'_, Database>,
+    coordinator: State<'_, IndexCoordinator>,
+    thumbnails: State<'_, ThumbnailCoordinator>,
+) -> Result<DiagnosticsSnapshot, String> {
+    Ok(crate::metrics::global().snapshot(
+        coordinator.active_job_count(),
+        db.write_queue_depth(),
+        thumbnails.queued(),
+        db.asset_count()?,
+    ))
 }
 
 /// 指令 2b: 全文搜索资产（SQLite FTS5）

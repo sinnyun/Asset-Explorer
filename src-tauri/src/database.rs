@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -164,11 +165,13 @@ type WriteJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
 struct WriteActor {
     sender: mpsc::SyncSender<WriteJob>,
+    outstanding: Arc<AtomicUsize>,
 }
 
 impl WriteActor {
     fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, String> {
         let (sender, receiver) = mpsc::sync_channel::<WriteJob>(WRITE_QUEUE_CAPACITY);
+        let outstanding = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new()
             .name("asset-db-writer".to_string())
             .spawn(move || {
@@ -178,7 +181,7 @@ impl WriteActor {
                 }
             })
             .map_err(|e| format!("启动 V2 数据库写入线程失败: {e}"))?;
-        Ok(Self { sender })
+        Ok(Self { sender, outstanding })
     }
 
     fn call<T, F>(&self, write: F) -> Result<T, String>
@@ -187,14 +190,23 @@ impl WriteActor {
         F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
     {
         let (result_sender, result_receiver) = mpsc::sync_channel(1);
-        self.sender
-            .send(Box::new(move |connection| {
-                let _ = result_sender.send(write(connection));
-            }))
-            .map_err(|_| "V2 数据库写入线程已停止".to_string())?;
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
+        let outstanding = self.outstanding.clone();
+        if self.sender.send(Box::new(move |connection| {
+            let result = write(connection);
+            outstanding.fetch_sub(1, Ordering::AcqRel);
+            let _ = result_sender.send(result);
+        })).is_err() {
+            self.outstanding.fetch_sub(1, Ordering::AcqRel);
+            return Err("V2 数据库写入线程已停止".to_string());
+        }
         result_receiver
             .recv()
             .map_err(|_| "V2 数据库写入任务未返回结果".to_string())?
+    }
+
+    fn outstanding(&self) -> usize {
+        self.outstanding.load(Ordering::Acquire)
     }
 }
 
@@ -304,6 +316,10 @@ impl Database {
     #[cfg(test)]
     pub fn write_queue_capacity(&self) -> usize {
         WRITE_QUEUE_CAPACITY
+    }
+
+    pub fn write_queue_depth(&self) -> usize {
+        self.writer.outstanding()
     }
 
     #[cfg(test)]

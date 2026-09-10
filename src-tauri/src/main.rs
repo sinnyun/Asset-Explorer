@@ -9,6 +9,7 @@ mod event_coalescer;
 mod index_jobs;
 mod indexer;
 mod metadata_extractor;
+mod metrics;
 mod models;
 mod sync;
 mod thumbnail_cache;
@@ -104,6 +105,7 @@ fn main() {
             start_scan_directory,
             cancel_job_v2,
             get_job_status_v2,
+            get_diagnostics_v2,
             watch_folder,
             unwatch_folder,
             search_assets,

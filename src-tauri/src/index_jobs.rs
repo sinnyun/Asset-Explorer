@@ -183,7 +183,6 @@ impl IndexCoordinator {
         Some(snapshot.clone())
     }
 
-    #[cfg(test)]
     pub fn active_job_count(&self) -> usize {
         self.state.lock().active_by_root.len()
     }

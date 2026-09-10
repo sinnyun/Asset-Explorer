@@ -1131,3 +1131,30 @@ fn full_scan_command_uses_generation_aware_writes_exclusively() {
     assert!(!implementation.contains("batch_save_scan_results"));
     assert!(!implementation.contains("batch_save_assets"));
 }
+
+#[test]
+fn pipeline_metrics_aggregate_and_reset_without_per_file_payloads() {
+    let metrics = crate::metrics::PipelineMetrics::default();
+    metrics.record_query(Duration::from_micros(100), true);
+    metrics.record_query(Duration::from_micros(300), false);
+    metrics.record_watcher_drop();
+    let snapshot = metrics.snapshot(2, 3, 4, 5);
+    assert_eq!(snapshot.query_count, 2);
+    assert_eq!(snapshot.average_query_micros, 200);
+    assert_eq!(snapshot.error_count, 1);
+    assert_eq!(snapshot.watcher_dropped_events, 1);
+    assert_eq!((snapshot.active_index_jobs, snapshot.database_writes, snapshot.thumbnail_requests, snapshot.asset_count), (2, 3, 4, 5));
+    metrics.reset_counters();
+    assert_eq!(metrics.snapshot(0, 0, 0, 0).query_count, 0);
+}
+
+#[test]
+fn diagnostics_are_registered_and_scale_fixture_has_path_guards() {
+    let main = include_str!("main.rs");
+    let script = include_str!("../../scripts/generate-scale-fixture.ps1");
+    assert!(main.contains("get_diagnostics_v2,"));
+    assert!(script.contains("$target -eq $root"));
+    assert!(script.contains("$target -eq $profile"));
+    assert!(script.contains("-not $AllowNonEmpty"));
+    assert!(script.contains("SetLength($SparseLargeFileBytes)"));
+}

@@ -37,7 +37,6 @@ impl ThumbnailCoordinator {
         Ok(ThumbnailReservation { inner: self.inner.clone() })
     }
 
-    #[cfg(test)]
     pub fn queued(&self) -> usize {
         self.inner.queued.load(Ordering::Acquire)
     }

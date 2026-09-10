@@ -55,6 +55,7 @@ impl WatcherRegistry {
         let mut watcher = notify::recommended_watcher(
             move |res: Result<Event, notify::Error>| {
                 if let Err(error) = tx.try_send(res) {
+                    crate::metrics::global().record_watcher_drop();
                     eprintln!("[Watcher] 有界事件队列已满或关闭，已丢弃事件并等待显式恢复: {error}");
                 }
             },
