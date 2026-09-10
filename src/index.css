@@ -24,3 +24,30 @@ body {
   background-color: #141414;
   color: #e5e5e5;
 }
+
+.panel-resize-handle {
+  position: relative;
+  z-index: 10;
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.panel-resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: #262626;
+  transition: background-color 120ms ease;
+}
+
+.panel-resize-handle:hover::after,
+body.is-resizing-panel .panel-resize-handle::after {
+  background: #3b82f6;
+}
+
+body.is-resizing-panel {
+  cursor: col-resize;
+  user-select: none;
+}

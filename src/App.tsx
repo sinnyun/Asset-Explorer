@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { MainArea } from './components/MainArea';
 import { PropertiesPanel } from './components/PropertiesPanel';
@@ -28,6 +28,23 @@ import { handleConfirmAddAndScan as scanAndAddFolder } from './hooks/useFolderSc
 import { useScanMonitor } from './hooks/useScanMonitor';
 import { ScanProgressBar } from './components/ScanProgressBar';
 import type { Asset } from './types';
+import { useResizablePanel } from './hooks/useResizablePanel';
+import { clampPanelWidth, readPanelLayout, writePanelLayout } from './services/panelLayout';
+
+const DEFAULT_LEFT_PANEL_WIDTH = 288;
+const DEFAULT_RIGHT_PANEL_WIDTH = 320;
+const LEFT_PANEL_MIN_WIDTH = 240;
+const LEFT_PANEL_MAX_WIDTH = 520;
+const RIGHT_PANEL_MIN_WIDTH = 280;
+const RIGHT_PANEL_MAX_WIDTH = 560;
+
+function getPanelLayoutStorage(): Storage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 export default function App() {
   const { state, setState } = useAppState();
@@ -46,6 +63,32 @@ export default function App() {
   }>({ isOpen: false, title: '', initialValue: '', onConfirm: () => {} });
   // 全屏文件预览：双击资产时打开
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(() => {
+    const stored = readPanelLayout(getPanelLayoutStorage()).leftWidth;
+    return clampPanelWidth(stored ?? DEFAULT_LEFT_PANEL_WIDTH, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_MAX_WIDTH);
+  });
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => {
+    const stored = readPanelLayout(getPanelLayoutStorage()).rightWidth;
+    return clampPanelWidth(stored ?? DEFAULT_RIGHT_PANEL_WIDTH, RIGHT_PANEL_MIN_WIDTH, RIGHT_PANEL_MAX_WIDTH);
+  });
+  const leftResize = useResizablePanel({
+    direction: 'left',
+    width: leftPanelWidth,
+    minWidth: LEFT_PANEL_MIN_WIDTH,
+    maxWidth: LEFT_PANEL_MAX_WIDTH,
+    onWidthChange: setLeftPanelWidth,
+  });
+  const rightResize = useResizablePanel({
+    direction: 'right',
+    width: rightPanelWidth,
+    minWidth: RIGHT_PANEL_MIN_WIDTH,
+    maxWidth: RIGHT_PANEL_MAX_WIDTH,
+    onWidthChange: setRightPanelWidth,
+  });
+
+  useEffect(() => {
+    writePanelLayout(getPanelLayoutStorage(), { leftWidth: leftPanelWidth, rightWidth: rightPanelWidth });
+  }, [leftPanelWidth, rightPanelWidth]);
 
   // 后台增量扫描监视：进度条 + 边扫边显示资产
   const { progress: scanProgress, startScan } = useScanMonitor(setState);
@@ -229,26 +272,35 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#141414] text-neutral-200 font-sans">
-      <Sidebar 
-        state={state} 
-        onChangeTab={handleChangeTab}
-        onSelectSmartFolder={handleSelectSmartFolder} 
-        onSelectFolder={handleSelectFolder}
-        onSelectTag={handleSelectTag}
-        onSelectCollection={handleSelectCollection}
-        onToggleFolderExpand={handleToggleFolderExpandWithLoad}
-        onCreateSmartFolder={handleCreateSmartFolder}
-        onCreateTag={handleCreateTag}
-        onCreateCollection={handleCreateCollection}
-        onContextMenuFolder={handleContextMenuFolder}
-        onContextMenuSmartFolder={handleContextMenuSmartFolder}
-        onContextMenuTag={handleContextMenuTag}
-        onContextMenuCollection={handleContextMenuCollection}
-        onContextMenuSidebar={handleContextMenuSidebar}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onScanLocalFolder={handleScanLocalFolder}
-        smartFolders={smartFolders}
-        onReloadWorkspace={handleReloadWorkspace}
+      <div className="h-full shrink-0" style={{ width: leftPanelWidth }}>
+        <Sidebar
+          state={state}
+          onChangeTab={handleChangeTab}
+          onSelectSmartFolder={handleSelectSmartFolder}
+          onSelectFolder={handleSelectFolder}
+          onSelectTag={handleSelectTag}
+          onSelectCollection={handleSelectCollection}
+          onToggleFolderExpand={handleToggleFolderExpandWithLoad}
+          onCreateSmartFolder={handleCreateSmartFolder}
+          onCreateTag={handleCreateTag}
+          onCreateCollection={handleCreateCollection}
+          onContextMenuFolder={handleContextMenuFolder}
+          onContextMenuSmartFolder={handleContextMenuSmartFolder}
+          onContextMenuTag={handleContextMenuTag}
+          onContextMenuCollection={handleContextMenuCollection}
+          onContextMenuSidebar={handleContextMenuSidebar}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onScanLocalFolder={handleScanLocalFolder}
+          smartFolders={smartFolders}
+          onReloadWorkspace={handleReloadWorkspace}
+        />
+      </div>
+      <div
+        {...leftResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整左侧栏宽度"
+        className="panel-resize-handle"
       />
       <MainArea 
         state={state} 
@@ -276,28 +328,37 @@ export default function App() {
         onAddMonitoredFolder={handleScanLocalFolder}
         onPreviewAsset={(asset) => setPreviewAsset(asset)}
       />
-      <PropertiesPanel 
-        state={state} 
-        smartFolders={smartFolders}
-        onUpdateSmartFolder={handleUpdateSmartFolder}
-        onDeleteSmartFolder={handleDeleteSmartFolder}
-        onMoveSmartFolder={handleMoveSmartFolder}
-        onTogglePinSmartFolder={handleTogglePinSmartFolder}
-        onUpdateTag={handleUpdateTag}
-        onDeleteTag={handleDeleteTag}
-        onMoveTag={handleMoveTag}
-        onTogglePinTag={handleTogglePinTag}
-        onUpdateCollection={handleUpdateCollection}
-        onDeleteCollection={handleDeleteCollection}
-        onMoveCollection={handleMoveCollection}
-        onTogglePinCollection={handleTogglePinCollection}
-        onUpdateFolder={handleUpdateFolder}
-        onDeleteFolder={handleDeleteFolder}
-        onMoveFolder={handleMoveFolder}
-        onTogglePinFolder={handleTogglePinFolder}
-        onUpdateAssetTags={updateAssetTags}
-        onUpdateAssetCollections={updateAssetCollections}
+      <div
+        {...rightResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整右侧属性栏宽度"
+        className="panel-resize-handle"
       />
+      <div className="h-full shrink-0" style={{ width: rightPanelWidth }}>
+        <PropertiesPanel
+          state={state}
+          smartFolders={smartFolders}
+          onUpdateSmartFolder={handleUpdateSmartFolder}
+          onDeleteSmartFolder={handleDeleteSmartFolder}
+          onMoveSmartFolder={handleMoveSmartFolder}
+          onTogglePinSmartFolder={handleTogglePinSmartFolder}
+          onUpdateTag={handleUpdateTag}
+          onDeleteTag={handleDeleteTag}
+          onMoveTag={handleMoveTag}
+          onTogglePinTag={handleTogglePinTag}
+          onUpdateCollection={handleUpdateCollection}
+          onDeleteCollection={handleDeleteCollection}
+          onMoveCollection={handleMoveCollection}
+          onTogglePinCollection={handleTogglePinCollection}
+          onUpdateFolder={handleUpdateFolder}
+          onDeleteFolder={handleDeleteFolder}
+          onMoveFolder={handleMoveFolder}
+          onTogglePinFolder={handleTogglePinFolder}
+          onUpdateAssetTags={updateAssetTags}
+          onUpdateAssetCollections={updateAssetCollections}
+        />
+      </div>
       
       {contextMenu && (
         <ContextMenu 

@@ -11,6 +11,32 @@ import { captureScrollPosition } from '../src/components/scrollPosition';
 import { buildGroupedAssetItems } from '../src/components/groupedAssetModel';
 import type { Asset, Folder } from '../src/types';
 import { collectFolderSubtreeIds, folderSummaryToFolder, mergeFolderSummaries } from '../src/services/folderTree';
+import { clampPanelWidth, readPanelLayout, writePanelLayout } from '../src/services/panelLayout';
+import { calculateResizeWidth } from '../src/hooks/useResizablePanel';
+
+test('panel widths are clamped and persisted safely', () => {
+  assert.equal(clampPanelWidth(100, 240, 520), 240);
+  assert.equal(clampPanelWidth(700, 240, 520), 520);
+  assert.equal(clampPanelWidth(360, 240, 520), 360);
+
+  const storage = new Map<string, string>();
+  const store = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+  };
+  assert.deepEqual(readPanelLayout(store), {});
+  writePanelLayout(store, { leftWidth: 360, rightWidth: 420 });
+  assert.deepEqual(readPanelLayout(store), { leftWidth: 360, rightWidth: 420 });
+  storage.set('assethub.panel-layout', '{"leftWidth":-1,"rightWidth":"wide"}');
+  assert.deepEqual(readPanelLayout(store), {});
+});
+
+test('resize width follows pointer movement for both panel directions', () => {
+  assert.equal(calculateResizeWidth('left', 300, 100, 140, 240, 520), 340);
+  assert.equal(calculateResizeWidth('right', 400, 900, 840, 280, 560), 460);
+  assert.equal(calculateResizeWidth('left', 300, 0, -100, 240, 520), 240);
+  assert.equal(calculateResizeWidth('right', 400, 1000, 0, 280, 560), 560);
+});
 
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({

@@ -298,7 +298,7 @@ export function Sidebar({
   };
 
   return (
-    <div className="flex h-full w-72 flex-shrink-0 bg-[#1e1e1e] border-r border-neutral-800 select-none">
+    <div className="flex h-full w-full flex-shrink-0 bg-[#1e1e1e] border-r border-neutral-800 select-none">
       
       {/* Column 1: Primary Navigation */}
       <div className="w-14 flex-shrink-0 bg-[#181818] border-r border-neutral-800 flex flex-col items-center py-4 gap-3">

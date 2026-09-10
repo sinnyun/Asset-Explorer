@@ -181,7 +181,7 @@ export function PropertiesPanel({
       };
 
       return (
-        <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col h-full overflow-y-auto custom-scrollbar select-none">
+        <div className="w-full flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col h-full overflow-y-auto custom-scrollbar select-none">
           <div className="p-4 border-b border-neutral-800 bg-[#191919]">
             <AssetPreviewToggle asset={asset} />
             <div className="text-[10px] uppercase font-semibold text-neutral-500 tracking-wider">资产属性</div>
@@ -454,7 +454,7 @@ export function PropertiesPanel({
     };
 
     return (
-      <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col p-5 text-neutral-300 select-none overflow-y-auto custom-scrollbar">
+      <div className="w-full flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col p-5 text-neutral-300 select-none overflow-y-auto custom-scrollbar">
         <div className="flex items-center justify-center w-12 h-12 bg-neutral-800 rounded-xl mb-3 mx-auto border border-neutral-700">
           <Copy size={24} className="text-blue-400" />
         </div>
@@ -632,7 +632,7 @@ export function PropertiesPanel({
 
   // Fallback: App Overview
   return (
-    <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col items-center justify-center text-neutral-500 p-6 text-center select-none">
+    <div className="w-full flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col items-center justify-center text-neutral-500 p-6 text-center select-none">
       <div className="w-14 h-14 bg-blue-500/10 text-blue-400 rounded-2xl flex items-center justify-center font-bold text-lg mb-3 border border-blue-500/20 shadow-lg shadow-blue-500/10">
         AE
       </div>
