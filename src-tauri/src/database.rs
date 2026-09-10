@@ -32,11 +32,22 @@ pub struct StorageStats {
     pub asset_count: usize,
 }
 
-/// V2 always uses the local application-data directory; storage selection is deferred.
+const STORAGE_POINTER_FILE: &str = "storage-location.txt";
+
+/// The pointer stays in the default app-data directory so the application can
+/// find a database that has been moved elsewhere on the next launch.
 pub fn get_active_data_dir() -> Result<PathBuf, String> {
-    dirs::data_local_dir()
+    let default_dir = dirs::data_local_dir()
         .map(|base| base.join("AssetHub"))
-        .ok_or_else(|| "无法定位 Windows 本地应用数据目录".to_string())
+        .ok_or_else(|| "无法定位 Windows 本地应用数据目录".to_string())?;
+    let pointer = default_dir.join(STORAGE_POINTER_FILE);
+    if let Ok(value) = fs::read_to_string(pointer) {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    Ok(default_dir)
 }
 
 /// Canonical Windows identity key. Preserve drive roots and the rooted separator.
@@ -57,6 +68,22 @@ fn timestamp_ns(value: &str) -> Result<i64, String> {
         .map_err(|e| format!("无效文件时间: {e}"))?
         .timestamp_nanos_opt()
         .ok_or_else(|| "文件时间超出纳秒范围".to_string())
+}
+
+fn copy_directory_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|e| format!("创建目录 {} 失败: {e}", target.display()))?;
+    for entry in fs::read_dir(source).map_err(|e| format!("读取目录 {} 失败: {e}", source.display()))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_directory_recursive(&source_path, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path)
+                .map_err(|e| format!("复制文件 {} 失败: {e}", source_path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn scan_file_fact(asset: &Asset) -> Result<FileFact, String> {
@@ -376,9 +403,80 @@ impl Database {
         }
     }
 
-    /// V2 storage selection is not available at this task boundary.
-    pub fn migrate_storage(&self, _new_dir: &Path) -> Result<(), String> {
-        Err("V2 暂不支持迁移存储位置".to_string())
+    /// Copy the complete V2 storage bundle and atomically publish a pointer for
+    /// the next launch. The current connection remains valid until restart.
+    pub fn migrate_storage(&self, new_dir: &Path) -> Result<(), String> {
+        let default_dir = dirs::data_local_dir()
+            .map(|base| base.join("AssetHub"))
+            .ok_or_else(|| "无法定位默认数据目录".to_string())?;
+        self.migrate_storage_with_pointer(new_dir, &default_dir)
+    }
+
+    #[cfg(test)]
+    pub fn migrate_storage_for_test(&self, new_dir: &Path, pointer_dir: &Path) -> Result<(), String> {
+        self.migrate_storage_with_pointer(new_dir, pointer_dir)
+    }
+
+    fn migrate_storage_with_pointer(&self, new_dir: &Path, pointer_dir: &Path) -> Result<(), String> {
+        let target = new_dir
+            .canonicalize()
+            .or_else(|_| {
+                let parent = new_dir.parent().unwrap_or_else(|| Path::new("."));
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                Ok::<PathBuf, String>(new_dir.to_path_buf())
+            })?;
+        let current = self.data_dir.canonicalize().unwrap_or_else(|_| self.data_dir.clone());
+        if target == current {
+            return Err("迁移目标不能与当前数据目录相同".to_string());
+        }
+        if target.exists() {
+            return Err(format!("迁移目标目录已存在，请选择一个新的空目录: {}", target.display()));
+        }
+
+        self.checkpoint();
+        let source_db = self.data_dir.join(V2_DATABASE_FILE);
+        if !source_db.exists() {
+            return Err("当前 V2 数据库文件不存在，无法迁移".to_string());
+        }
+
+        let staging = target.with_file_name(format!(
+            ".{}-migration-{}",
+            V2_DATABASE_FILE,
+            std::process::id()
+        ));
+        if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|e| format!("清理上次迁移临时目录失败: {e}"))?;
+        }
+        fs::create_dir_all(&staging).map_err(|e| format!("创建迁移临时目录失败: {e}"))?;
+        let result = (|| {
+            fs::copy(&source_db, staging.join(V2_DATABASE_FILE))
+                .map_err(|e| format!("复制 SQLite 数据库失败: {e}"))?;
+            for suffix in ["-wal", "-shm"] {
+                let source = self.data_dir.join(format!("{V2_DATABASE_FILE}{suffix}"));
+                if source.exists() {
+                    fs::copy(&source, staging.join(format!("{V2_DATABASE_FILE}{suffix}")))
+                        .map_err(|e| format!("复制 SQLite 辅助文件失败: {e}"))?;
+                }
+            }
+            let thumbnails = self.data_dir.join("thumbnails");
+            if thumbnails.exists() {
+                copy_directory_recursive(&thumbnails, &staging.join("thumbnails"))?;
+            }
+            fs::rename(&staging, &target).map_err(|e| format!("提交迁移目录失败: {e}"))?;
+
+            fs::create_dir_all(pointer_dir).map_err(|e| format!("创建迁移配置目录失败: {e}"))?;
+            let pointer_tmp = pointer_dir.join(format!("{STORAGE_POINTER_FILE}.tmp"));
+            fs::write(&pointer_tmp, target.to_string_lossy().as_bytes())
+                .map_err(|e| format!("写入迁移配置失败: {e}"))?;
+            fs::rename(pointer_tmp, pointer_dir.join(STORAGE_POINTER_FILE))
+                .map_err(|e| format!("提交迁移配置失败: {e}"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_dir_all(&target);
+        }
+        result
     }
 
     /// 创建全新的 V2 schema。V2 数据库不兼容也不迁移旧表。

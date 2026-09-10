@@ -628,7 +628,7 @@ pub async fn get_storage_stats(db: State<'_, Database>) -> Result<crate::databas
     .map_err(|e| e.to_string())?
 }
 
-/// 指令 22: V2 尚未开放存储位置选择；返回明确错误，不触碰任何文件。
+/// 指令 22: 复制 V2 数据库、WAL/SHM 和缩略图缓存，并为下次启动发布新位置。
 #[tauri::command]
 pub async fn migrate_data_storage(db: State<'_, Database>, new_path: String) -> Result<String, String> {
     let db = db.inner().clone();

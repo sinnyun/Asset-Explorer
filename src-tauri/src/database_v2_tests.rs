@@ -57,11 +57,13 @@ fn v2_default_directory_ignores_obsolete_storage_config() {
 }
 
 #[test]
-fn v2_storage_relocation_is_disabled_without_side_effects() {
-    let (dir, db) = test_db("no-relocation");
+fn v2_storage_relocation_copies_database_and_publishes_pointer() {
+    let (dir, db) = test_db("relocation");
     let target = dir.join("relocated");
-    assert!(db.migrate_storage(&target).is_err(), "storage selection is outside Task 1");
-    assert!(!target.exists());
+    let pointer_dir = dir.join("pointer");
+    db.migrate_storage_for_test(&target, &pointer_dir).unwrap();
+    assert!(target.join(V2_DATABASE_FILE).exists());
+    assert_eq!(std::fs::read_to_string(pointer_dir.join("storage-location.txt")).unwrap(), target.to_string_lossy());
 }
 
 #[test]

@@ -9,6 +9,7 @@
     "core:event:allow-listen",
     "shell:allow-open",
     "dialog:default",
+    "dialog:allow-confirm",
     "fs:default"
   ]
 }

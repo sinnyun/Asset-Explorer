@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { formatBytes } from '../lib/utils';
 import { dataService } from '../services/dataService';
+import { confirm } from '@tauri-apps/plugin-dialog';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -43,10 +44,11 @@ export function SettingsModal({ isOpen, onClose, onUpdateTheme, onRelocatePaths 
 
   const handleStartMigration = async () => {
     if (!migrationTargetPath.trim()) return;
-    const confirm = window.confirm(
-      `确定将软件的所有数据（包括 SQLite 数据库、WAL 日志、缩略图缓存等）完整迁移至:\n${migrationTargetPath}\n\n迁移成功后程序将自动更新配置并重启生效。`
-    );
-    if (!confirm) return;
+    const message = `确定将软件的所有数据（包括 SQLite 数据库、WAL 日志、缩略图缓存等）完整迁移至:\n${migrationTargetPath}\n\n迁移成功后程序将自动更新配置并重启生效。`;
+    const approved = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+      ? await confirm(message, { title: '确认迁移数据', kind: 'warning' })
+      : window.confirm(message);
+    if (!approved) return;
 
     setIsMigrating(true);
     setMigrationStatus('正在执行 WAL 检查点并挂起写入事务...');
