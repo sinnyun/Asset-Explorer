@@ -72,7 +72,7 @@ export function CollectionProperties({
   };
 
   return (
-    <div className="w-80 flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col h-full overflow-y-auto custom-scrollbar select-none">
+    <div className="w-full flex-shrink-0 bg-[#1e1e1e] border-l border-neutral-800 flex flex-col h-full overflow-y-auto custom-scrollbar select-none">
       {/* Header Banner */}
       <div className="p-4 border-b border-neutral-800 bg-[#191919]">
         <div className="flex items-center justify-between mb-3">

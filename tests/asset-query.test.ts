@@ -38,6 +38,14 @@ test('resize width follows pointer movement for both panel directions', () => {
   assert.equal(calculateResizeWidth('right', 400, 1000, 0, 280, 560), 560);
 });
 
+test('all properties panel variants fill the resized right panel', () => {
+  for (const name of ['FolderProperties', 'TagProperties', 'CollectionProperties', 'SmartFolderProperties']) {
+    const source = readFileSync(new URL(`../src/components/properties/${name}.tsx`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /className="w-80\b/);
+    assert.match(source, /className="w-full\b/);
+  }
+});
+
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({
     search: '   ',
