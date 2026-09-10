@@ -61,9 +61,13 @@ fn v2_storage_relocation_copies_database_and_publishes_pointer() {
     let (dir, db) = test_db("relocation");
     let target = dir.join("relocated");
     let pointer_dir = dir.join("pointer");
+    std::fs::create_dir_all(&target).unwrap();
     db.migrate_storage_for_test(&target, &pointer_dir).unwrap();
     assert!(target.join(V2_DATABASE_FILE).exists());
-    assert_eq!(std::fs::read_to_string(pointer_dir.join("storage-location.txt")).unwrap(), target.to_string_lossy());
+    assert_eq!(
+        std::fs::read_to_string(pointer_dir.join("storage-location.txt")).unwrap(),
+        target.canonicalize().unwrap().to_string_lossy(),
+    );
 }
 
 #[test]

@@ -430,7 +430,17 @@ impl Database {
             return Err("迁移目标不能与当前数据目录相同".to_string());
         }
         if target.exists() {
-            return Err(format!("迁移目标目录已存在，请选择一个新的空目录: {}", target.display()));
+            if !target.is_dir() {
+                return Err(format!("迁移目标不是文件夹: {}", target.display()));
+            }
+            let mut entries = fs::read_dir(&target)
+                .map_err(|e| format!("读取迁移目标目录失败: {e}"))?;
+            if entries.next().is_some() {
+                return Err(format!("迁移目标目录必须为空，请先清理该目录: {}", target.display()));
+            }
+            // The final rename below is intentionally atomic. Remove only the
+            // directory after proving it is empty, then publish the staged copy.
+            fs::remove_dir(&target).map_err(|e| format!("准备迁移目标目录失败: {e}"))?;
         }
 
         self.checkpoint();
