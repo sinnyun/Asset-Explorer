@@ -1471,19 +1471,36 @@ impl Database {
         let mut conn = self.conn.lock();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().timestamp_millis();
+        // Older index records may not have a folder_id. Resolve the folder
+        // path inside the same transaction so those records are removed too.
+        let root_path: Option<String> = tx
+            .query_row(
+                "SELECT normalized_path FROM folders WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let root_path = root_path.unwrap_or_default();
+        let path_lower = format!("{}\\", root_path.trim_end_matches('\\'));
+        let path_upper = format!("{}]", root_path.trim_end_matches('\\'));
         // Removing a monitored folder removes its indexed subtree from active
         // results, but keeps the physical files and user metadata recoverable
         // if the folder is added again later.
         let assets = tx.execute(
             "UPDATE assets SET deleted_at = ?1, record_version = record_version + 1
-             WHERE deleted_at IS NULL AND folder_id IN (
-               WITH RECURSIVE descendants(id) AS (
-                 SELECT id FROM folders WHERE id = ?2
-                 UNION ALL
-                 SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id
-               ) SELECT id FROM descendants
+             WHERE deleted_at IS NULL AND (
+               folder_id IN (
+                 WITH RECURSIVE descendants(id) AS (
+                   SELECT id FROM folders WHERE id = ?2
+                   UNION ALL
+                   SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id
+                 ) SELECT id FROM descendants
+               )
+               OR (?3 <> '' AND (normalized_path = ?3 OR
+                   (normalized_path >= ?4 AND normalized_path < ?5)))
              )",
-            params![now, id],
+            params![now, id, root_path, path_lower, path_upper],
         ).map_err(|e| e.to_string())?;
         let folders = tx.execute(
             "DELETE FROM folders WHERE id IN (
