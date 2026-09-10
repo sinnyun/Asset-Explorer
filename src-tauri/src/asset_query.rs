@@ -8,8 +8,34 @@ use base64::Engine;
 use rusqlite::types::Value;
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 const MAX_PAGE_SIZE: usize = 300;
+
+fn attach_asset_relations(conn: &rusqlite::Connection, items: &mut [AssetSummary]) -> Result<(), String> {
+    if items.is_empty() { return Ok(()); }
+    let ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let tag_sql = format!("SELECT asset_id, tag_id FROM asset_tags WHERE asset_id IN ({placeholders}) ORDER BY asset_id, tag_id");
+    let mut tag_stmt = conn.prepare(&tag_sql).map_err(|e| format!("准备资产标签查询失败: {e}"))?;
+    let tag_rows = tag_stmt.query_map(params_from_iter(ids.iter()), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| format!("读取资产标签失败: {e}"))?;
+    let mut tags: HashMap<String, Vec<String>> = HashMap::new();
+    for row in tag_rows { let (asset_id, tag_id) = row.map_err(|e| format!("读取资产标签行失败: {e}"))?; tags.entry(asset_id).or_default().push(tag_id); }
+
+    let collection_sql = format!("SELECT asset_id, collection_id FROM asset_collections WHERE asset_id IN ({placeholders}) ORDER BY asset_id, collection_id");
+    let mut collection_stmt = conn.prepare(&collection_sql).map_err(|e| format!("准备资产集合查询失败: {e}"))?;
+    let collection_rows = collection_stmt.query_map(params_from_iter(ids.iter()), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| format!("读取资产集合失败: {e}"))?;
+    let mut collections: HashMap<String, Vec<String>> = HashMap::new();
+    for row in collection_rows { let (asset_id, collection_id) = row.map_err(|e| format!("读取资产集合行失败: {e}"))?; collections.entry(asset_id).or_default().push(collection_id); }
+
+    for item in items {
+        item.tag_ids = tags.remove(&item.id).unwrap_or_default();
+        item.collection_ids = collections.remove(&item.id).unwrap_or_default();
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetCursor {
@@ -164,6 +190,8 @@ impl Database {
                         color: row.get(9)?,
                         width: row.get(10)?,
                         height: row.get(11)?,
+                        tag_ids: Vec::new(),
+                        collection_ids: Vec::new(),
                         record_version: row.get(12)?,
                     })
                 })
@@ -174,6 +202,7 @@ impl Database {
 
             let has_more = items.len() > limit;
             items.truncate(limit);
+            attach_asset_relations(conn, &mut items)?;
             let next_cursor = if has_more {
                 items.last().map(|last| {
                     let (text, number) = match query.sort {

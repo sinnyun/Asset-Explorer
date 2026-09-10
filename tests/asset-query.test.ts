@@ -8,6 +8,7 @@ import { ThumbnailMemoryCache } from '../src/services/thumbnailMemoryCache';
 import { calculateVirtualRange } from '../src/components/virtualRange';
 import { initialSplitState, splitViewReducer } from '../src/components/splitViewState';
 import { captureScrollPosition } from '../src/components/scrollPosition';
+import { folderSummaryToFolder, mergeFolderSummaries } from '../src/services/folderTree';
 
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({
@@ -32,7 +33,7 @@ test('asset query key is stable for equivalent filter ordering', () => {
 function asset(id: string, recordVersion: number): AssetSummary {
   return {
     id, recordVersion, name: id, path: `D:/${id}`, type: 'image', size: 1,
-    mtimeNs: 1, rating: 0, favorite: false,
+    mtimeNs: 1, rating: 0, favorite: false, tagIds: [], collectionIds: [],
   };
 }
 
@@ -156,4 +157,35 @@ test('scroll handlers capture currentTarget before React releases the event', ()
   captureScrollPosition(next => { update = next; }, event);
   event.currentTarget = null;
   assert.deepEqual(update?.({ scrollTop: 0 }), { scrollTop: 240 });
+});
+
+test('folder summaries are converted into and merged with the sidebar folder cache', () => {
+  const existing = folderSummaryToFolder({
+    id: 'root', name: 'Root', path: 'D:/Root', isMonitored: true,
+    assetCount: 2, hasChildren: true, recordVersion: 1,
+  });
+  const merged = mergeFolderSummaries([existing], [
+    { id: 'root', name: 'Root renamed', path: 'D:/Root', isMonitored: true, assetCount: 4, hasChildren: true, recordVersion: 2 },
+    { id: 'child', name: 'Child', path: 'D:/Root/Child', parentId: 'root', isMonitored: false, assetCount: 1, hasChildren: false, recordVersion: 1 },
+  ]);
+  assert.deepEqual(merged.map(folder => folder.id), ['root', 'child']);
+  assert.equal(merged[0].name, 'Root renamed');
+  assert.deepEqual(merged[0].tags, []);
+});
+
+test('main workspace wires folder results into the folder view', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const mainSource = readFileSync(new URL('../src/components/MainArea.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(appSource, /const filteredFolders: import\('\.\/types'\)\.Folder\[\] = \[\];/);
+  assert.match(mainSource, /filteredFolders/);
+  assert.match(mainSource, /onContextMenuFolder/);
+});
+
+test('asset query contract carries tag and collection ids for cards', () => {
+  const typesSource = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
+  const routerSource = readFileSync(new URL('../src/server/v2Router.ts', import.meta.url), 'utf8');
+  assert.match(typesSource, /interface AssetSummary[\s\S]*tagIds: string\[\]/);
+  assert.match(typesSource, /interface AssetSummary[\s\S]*collectionIds: string\[\]/);
+  assert.match(routerSource, /assetTags/);
+  assert.match(routerSource, /assetCollections/);
 });

@@ -15,9 +15,11 @@ interface Props {
   onToggleSelection: (id: string, multi: boolean) => void;
   onContextMenu: (event: React.MouseEvent, id: string) => void;
   onPreview?: (asset: Asset) => void;
+  tagLabels?: Map<string, string>;
+  collectionLabels?: Map<string, string>;
 }
 
-export function VirtualAssetList({ assets, selectedIds, loading, hasNextPage, onLoadNextPage, onToggleSelection, onContextMenu, onPreview }: Props) {
+export function VirtualAssetList({ assets, selectedIds, loading, hasNextPage, onLoadNextPage, onToggleSelection, onContextMenu, onPreview, tagLabels = new Map(), collectionLabels = new Map() }: Props) {
   const viewportRef = React.useRef<HTMLDivElement>(null);
   const [geometry, setGeometry] = React.useState({ height: 600, scrollTop: 0 });
   const rowHeight = 52;
@@ -67,6 +69,7 @@ export function VirtualAssetList({ assets, selectedIds, loading, hasNextPage, on
                 <ThumbnailImage asset={asset} className="w-full h-full object-contain" fallbackIcon={<FileText size={18} className="text-neutral-500" />} />
               </div>
               <span className="min-w-0 flex-1 truncate text-sm" title={asset.name}>{asset.name}</span>
+              <span className="hidden max-w-64 truncate text-[10px] text-neutral-500 md:block" title={[...asset.tags.map(id => tagLabels.get(id) ?? id), ...asset.collections.map(id => collectionLabels.get(id) ?? id)].join(', ')}>{[...asset.tags.map(id => tagLabels.get(id) ?? id), ...asset.collections.map(id => collectionLabels.get(id) ?? id)].slice(0, 3).join(' · ')}</span>
               <span className="w-24 shrink-0 text-right text-xs text-neutral-500">{formatBytes(asset.size)}</span>
               <span className="w-24 shrink-0 text-right text-xs text-neutral-500">{asset.dateModified.slice(0, 10)}</span>
             </div>

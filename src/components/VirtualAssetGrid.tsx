@@ -15,6 +15,8 @@ interface Props {
   onToggleSelection: (id: string, multi: boolean) => void;
   onContextMenu: (event: React.MouseEvent, id: string) => void;
   onPreview?: (asset: Asset) => void;
+  tagLabels?: Map<string, string>;
+  collectionLabels?: Map<string, string>;
 }
 
 function fallbackIcon(type: string) {
@@ -24,7 +26,7 @@ function fallbackIcon(type: string) {
   return <FileText size={28} className="text-neutral-500" />;
 }
 
-export function VirtualAssetGrid({ assets, selectedIds, loading, hasNextPage, onLoadNextPage, onToggleSelection, onContextMenu, onPreview }: Props) {
+export function VirtualAssetGrid({ assets, selectedIds, loading, hasNextPage, onLoadNextPage, onToggleSelection, onContextMenu, onPreview, tagLabels = new Map(), collectionLabels = new Map() }: Props) {
   const viewportRef = React.useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = React.useState({ width: 900, height: 600, scrollTop: 0 });
   const gap = 16;
@@ -90,6 +92,9 @@ export function VirtualAssetGrid({ assets, selectedIds, loading, hasNextPage, on
               </div>
               <div className="h-20 p-2.5 flex flex-col justify-between">
                 <div className="truncate text-sm font-medium" title={asset.name}>{asset.name}</div>
+                {(asset.tags.length > 0 || asset.collections.length > 0) && <div className="flex min-w-0 gap-1 overflow-hidden text-[10px] text-neutral-400">
+                  {[...asset.tags.map(id => tagLabels.get(id) ?? id), ...asset.collections.map(id => collectionLabels.get(id) ?? id)].slice(0, 3).map(label => <span key={label} className="truncate rounded bg-neutral-800 px-1.5 py-0.5">{label}</span>)}
+                </div>}
                 <div className="flex justify-between border-t border-neutral-800 pt-1 text-[11px] text-neutral-500">
                   <span>{formatBytes(asset.size)}</span><span>{asset.dateModified.slice(0, 10)}</span>
                 </div>

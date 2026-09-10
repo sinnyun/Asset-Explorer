@@ -14,7 +14,22 @@ function sendFailure(res: express.Response, error: unknown) {
   res.status(status).json({ error: message });
 }
 
-function summary(row: typeof assets.$inferSelect) {
+type AssetRelations = { tags: Map<string, string[]>; collections: Map<string, string[]> };
+
+async function loadAssetRelations(ids: string[]): Promise<AssetRelations> {
+  if (ids.length === 0) return { tags: new Map(), collections: new Map() };
+  const [tagRows, collectionRows] = await Promise.all([
+    db.select({ assetId: assetTags.assetId, tagId: assetTags.tagId }).from(assetTags).where(inArray(assetTags.assetId, ids)),
+    db.select({ assetId: assetCollections.assetId, collectionId: assetCollections.collectionId }).from(assetCollections).where(inArray(assetCollections.assetId, ids)),
+  ]);
+  const tags = new Map<string, string[]>();
+  const collections = new Map<string, string[]>();
+  for (const row of tagRows) tags.set(row.assetId, [...(tags.get(row.assetId) ?? []), row.tagId]);
+  for (const row of collectionRows) collections.set(row.assetId, [...(collections.get(row.assetId) ?? []), row.collectionId]);
+  return { tags, collections };
+}
+
+function summary(row: typeof assets.$inferSelect, relations?: AssetRelations) {
   return {
     id: row.id,
     name: row.name,
@@ -28,6 +43,8 @@ function summary(row: typeof assets.$inferSelect) {
     color: row.color ?? undefined,
     width: row.width ?? undefined,
     height: row.height ?? undefined,
+    tagIds: relations?.tags.get(row.id) ?? [],
+    collectionIds: relations?.collections.get(row.id) ?? [],
     recordVersion: row.recordVersion,
   };
 }
@@ -85,8 +102,9 @@ v2Router.post('/v2/assets/query', async (req: AuthRequest, res) => {
     const rows = await db.select().from(assets).where(and(...conditions))
       .orderBy(direction(sortColumn), direction(assets.id)).limit(limit + 1).offset(offset);
     const hasMore = rows.length > limit;
+    const relations = await loadAssetRelations(rows.slice(0, limit).map(row => row.id));
     res.json({
-      items: rows.slice(0, limit).map(summary),
+      items: rows.slice(0, limit).map(row => summary(row, relations)),
       nextCursor: hasMore ? encodeOffsetCursor(offset + limit) : undefined,
       totalApprox: undefined,
       queryRevision: 0,
@@ -132,10 +150,11 @@ v2Router.post('/v2/assets/details', async (req: AuthRequest, res) => {
     if (ids.length > 1_000) return res.status(400).json({ error: 'At most 1000 asset IDs are allowed' });
     if (ids.length === 0) return res.json([]);
     const rows = await db.select().from(assets).where(and(eq(assets.userId, userId), inArray(assets.id, ids)));
+    const relations = await loadAssetRelations(rows.map(row => row.id));
     const byId = new Map(rows.map(row => [row.id, row]));
     res.json(ids.flatMap(id => {
       const row = byId.get(id);
-      return row ? [{ ...summary(row), normalizedPath: row.path.toLocaleLowerCase(), customName: row.customName ?? undefined, notes: row.notes ?? undefined }] : [];
+      return row ? [{ ...summary(row, relations), normalizedPath: row.path.toLocaleLowerCase(), customName: row.customName ?? undefined, notes: row.notes ?? undefined }] : [];
     }));
   } catch (error) { sendFailure(res, error); }
 });

@@ -113,6 +113,8 @@ export interface AssetSummary {
   color?: string;
   width?: number;
   height?: number;
+  tagIds: string[];
+  collectionIds: string[];
   recordVersion: number;
 }
 

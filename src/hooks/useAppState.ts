@@ -5,6 +5,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { AssetState } from '../types';
 import { dataService } from '../services/dataService';
+import { mergeFolderSummaries } from '../services/folderTree';
 
 /**
  * 初始状态懒初始化：始终使用空数据，不依赖环境检测
@@ -60,10 +61,13 @@ export function useAppState() {
     const loadOnce = async () => {
       loadAttemptRef.current += 1;
       try {
-        const shell = await dataService.getWorkspaceShell();
+        const [shell, rootPage] = await Promise.all([
+          dataService.getWorkspaceShell(),
+          dataService.queryFolders({ limit: 300 }),
+        ]);
         setState(prev => ({
           ...prev,
-          folders: shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })),
+          folders: mergeFolderSummaries(shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })), rootPage.items),
           tags: shell.tags,
           collections: shell.collections,
           customSmartFolders: shell.smartFolders,

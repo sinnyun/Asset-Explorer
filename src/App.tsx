@@ -16,11 +16,13 @@ import { AssetPreviewOverlay } from './components/preview/AssetPreviewOverlay';
 import { smartFolders } from './data';
 import { useAppState } from './hooks/useAppState';
 import { useAssetQuery } from './hooks/useAssetQuery';
+import { useFolderQuery } from './hooks/useFolderQuery';
 import { useNavigationActions } from './hooks/useNavigationActions';
 import { useEntityActions } from './hooks/useEntityActions';
 import { useContextMenuHandlers } from './hooks/useContextMenuHandlers';
 import { useMiscActions } from './hooks/useMiscActions';
 import { dataService } from './services/dataService';
+import { folderSummaryToFolder, mergeFolderSummaries } from './services/folderTree';
 import { runtime } from './services/api';
 import { handleConfirmAddAndScan as scanAndAddFolder } from './hooks/useFolderScan';
 import { useScanMonitor } from './hooks/useScanMonitor';
@@ -56,6 +58,16 @@ export default function App() {
     handleToggleIncludeSubfolders, handleToggleGroupCollapse, handleSortChange,
   } = useNavigationActions(setState);
 
+  const handleToggleFolderExpandWithLoad = (folderId: string) => {
+    const expanding = !state.expandedFolderIds.includes(folderId);
+    handleToggleFolderExpand(folderId);
+    if (expanding) {
+      void dataService.queryFolders({ parentId: folderId, limit: 300 }).then(page => {
+        setState(previous => ({ ...previous, folders: mergeFolderSummaries(previous.folders, page.items) }));
+      }).catch(error => console.warn('[App] 加载子文件夹失败:', error));
+    }
+  };
+
   // 实体 CRUD 操作
   const {
     handleCreateSmartFolder, handleUpdateSmartFolder, handleDeleteSmartFolder,
@@ -79,6 +91,7 @@ export default function App() {
     state.activeTagId, state.activeCollectionId, state.sortOption,
   ]);
   const assetResults = useAssetQuery(assetQuery);
+  const folderResults = useFolderQuery({ parentId: state.activeFolderId ?? undefined, limit: 300 });
   const filteredAssets = React.useMemo<Asset[]>(() => assetResults.items.map(item => {
     const dateModified = new Date(Math.max(0, item.mtimeNs / 1_000_000)).toISOString();
     return {
@@ -90,13 +103,16 @@ export default function App() {
       folderId: item.folderId ?? '',
       dateModified,
       dateAdded: dateModified,
-      tags: [],
-      collections: [],
+      tags: item.tagIds ?? [],
+      collections: item.collectionIds ?? [],
       width: item.width,
       height: item.height,
     };
   }), [assetResults.items]);
-  const filteredFolders: import('./types').Folder[] = [];
+  const filteredFolders = React.useMemo(
+    () => folderResults.items.map(folderSummaryToFolder),
+    [folderResults.items],
+  );
 
   // Legacy action panels temporarily consume only the bounded active query page,
   // never the complete database table.
@@ -120,7 +136,7 @@ export default function App() {
     dataService.syncAssetTags(assetId, tagIds).catch(error => {
       console.error(error);
       setState(prev => ({ ...prev, assets: prev.assets.map(asset => asset.id === assetId ? { ...asset, tags: previous } : asset) }));
-    });
+    }).then(() => assetResults.refresh());
   };
 
   const updateAssetCollections = (assetId: string, collectionIds: string[]) => {
@@ -132,7 +148,17 @@ export default function App() {
     dataService.syncAssetCollections(assetId, collectionIds).catch(error => {
       console.error(error);
       setState(prev => ({ ...prev, assets: prev.assets.map(asset => asset.id === assetId ? { ...asset, collections: previous } : asset) }));
-    });
+    }).then(() => assetResults.refresh());
+  };
+
+  const handleBulkAddTagsAndRefresh = async (tagIds: string[]) => {
+    await handleBulkAddTags(tagIds);
+    assetResults.refresh();
+  };
+
+  const handleBulkAddCollectionsAndRefresh = async (collectionIds: string[]) => {
+    await handleBulkAddCollections(collectionIds);
+    assetResults.refresh();
   };
 
   // 右键菜单操作
@@ -184,10 +210,13 @@ export default function App() {
 
   const handleReloadWorkspace = async () => {
     try {
-      const shell = await dataService.getWorkspaceShell();
+      const [shell, rootPage] = await Promise.all([
+        dataService.getWorkspaceShell(),
+        dataService.queryFolders({ limit: 300 }),
+      ]);
       setState(prev => ({
         ...prev,
-        folders: shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })),
+        folders: mergeFolderSummaries(shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })), rootPage.items),
         tags: shell.tags,
         collections: shell.collections,
         customSmartFolders: shell.smartFolders,
@@ -207,7 +236,7 @@ export default function App() {
         onSelectFolder={handleSelectFolder}
         onSelectTag={handleSelectTag}
         onSelectCollection={handleSelectCollection}
-        onToggleFolderExpand={handleToggleFolderExpand}
+        onToggleFolderExpand={handleToggleFolderExpandWithLoad}
         onCreateSmartFolder={handleCreateSmartFolder}
         onCreateTag={handleCreateTag}
         onCreateCollection={handleCreateCollection}
@@ -225,6 +254,7 @@ export default function App() {
         state={state} 
         filteredAssets={filteredAssets} 
         filteredFolders={filteredFolders}
+        folderLoading={folderResults.loading}
         queryLoading={assetResults.loading}
         queryError={assetResults.error}
         hasNextPage={assetResults.hasNextPage}
@@ -281,8 +311,8 @@ export default function App() {
       <BulkActionBar 
         state={state}
         onClear={handleClearSelection}
-        onAddTags={handleBulkAddTags}
-        onAddCollections={handleBulkAddCollections}
+        onAddTags={handleBulkAddTagsAndRefresh}
+        onAddCollections={handleBulkAddCollectionsAndRefresh}
         onDelete={() => handleBulkDelete(state)}
       />
 

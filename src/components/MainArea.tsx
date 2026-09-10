@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, Columns2, FolderPlus, FolderTree, Grid, List, Loader2, PackageOpen, Search } from 'lucide-react';
+import { AlertTriangle, Columns2, Folder as FolderIcon, FolderPlus, FolderTree, Grid, List, Loader2, PackageOpen, Search } from 'lucide-react';
 import type { Asset, AssetState, Folder, SortOption } from '../types';
 import { cn } from '../lib/utils';
 import { MonitoredSplitView } from './MonitoredSplitView';
@@ -10,6 +10,7 @@ interface MainAreaProps {
   state: AssetState;
   filteredAssets: Asset[];
   filteredFolders: Folder[];
+  folderLoading: boolean;
   queryLoading: boolean;
   queryError: string | null;
   hasNextPage: boolean;
@@ -33,7 +34,8 @@ interface MainAreaProps {
 export function MainArea({
   state,
   filteredAssets,
-  filteredFolders: _filteredFolders,
+  filteredFolders,
+  folderLoading,
   queryLoading,
   queryError,
   hasNextPage,
@@ -47,9 +49,9 @@ export function MainArea({
   onSortChange,
   onSearchSubmit,
   onContextMenuAsset,
-  onContextMenuFolder: _onContextMenuFolder,
+  onContextMenuFolder,
   onContextMenuCanvas,
-  onSelectFolder: _onSelectFolder,
+  onSelectFolder,
   onAddMonitoredFolder,
   onPreviewAsset,
 }: MainAreaProps) {
@@ -59,6 +61,8 @@ export function MainArea({
     () => new Set(state.selectedItems.filter(item => item.type === 'asset').map(item => item.id)),
     [state.selectedItems],
   );
+  const tagLabels = React.useMemo(() => new Map(state.tags.map(tag => [tag.id, tag.name])), [state.tags]);
+  const collectionLabels = React.useMemo(() => new Map(state.collections.map(collection => [collection.id, collection.name])), [state.collections]);
 
   const virtualProps = {
     assets: filteredAssets,
@@ -69,6 +73,8 @@ export function MainArea({
     onToggleSelection: (id: string, multi: boolean) => onToggleSelection(id, 'asset' as const, multi),
     onContextMenu: onContextMenuAsset,
     onPreview: onPreviewAsset,
+    tagLabels,
+    collectionLabels,
   };
 
   return (
@@ -139,19 +145,50 @@ export function MainArea({
                 <div className="mt-1 text-sm text-neutral-400">{queryError}</div>
               </div>
             </div>
-          ) : queryLoading && filteredAssets.length === 0 ? (
+          ) : queryLoading && filteredAssets.length === 0 && filteredFolders.length === 0 ? (
             <div className="h-full flex items-center justify-center gap-2 text-sm text-neutral-400"><Loader2 className="animate-spin" size={18} />正在读取文件…</div>
-          ) : filteredAssets.length === 0 ? (
+          ) : filteredAssets.length === 0 && filteredFolders.length === 0 && !folderLoading ? (
             <div className="h-full flex flex-col items-center justify-center text-center text-neutral-400">
               <PackageOpen size={42} className="mb-3 text-neutral-700" />
               <div className="font-medium text-neutral-300">当前范围没有文件</div>
               <div className="mt-1 text-sm">可选择其他文件夹、调整筛选，或添加监视文件夹。</div>
               {onAddMonitoredFolder && <button onClick={onAddMonitoredFolder} className="mt-4 flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm text-white"><FolderPlus size={16} />添加监视文件夹</button>}
             </div>
-          ) : state.viewMode === 'grid' ? (
-            <VirtualAssetGrid {...virtualProps} />
           ) : (
-            <VirtualAssetList {...virtualProps} />
+            <div className="flex h-full min-h-0 flex-col gap-3">
+              {filteredFolders.length > 0 && (
+                <div className="grid max-h-56 shrink-0 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 custom-scrollbar">
+                  {filteredFolders.map(folder => {
+                    const selected = state.selectedItems.some(item => item.type === 'folder' && item.id === folder.id);
+                    return (
+                      <div
+                        key={folder.id}
+                        onClick={event => { event.stopPropagation(); onToggleSelection(folder.id, 'folder', event.ctrlKey || event.metaKey); onSelectFolder?.(folder.id); }}
+                        onContextMenu={event => onContextMenuFolder(event, folder.id)}
+                        className={cn(
+                          'flex min-w-0 cursor-pointer items-center gap-3 rounded-lg border bg-[#1e1e1e] px-3 py-2.5 transition-colors',
+                          selected ? 'border-blue-500 bg-blue-500/10 ring-1 ring-blue-500/40' : 'border-neutral-800 hover:border-neutral-600',
+                        )}
+                      >
+                        <FolderIcon size={22} className="shrink-0 text-blue-400" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-neutral-200" title={folder.name}>{folder.name}</div>
+                          <div className="truncate text-[11px] text-neutral-500" title={folder.path}>{folder.path}</div>
+                        </div>
+                        <span className="shrink-0 text-[11px] text-neutral-500">打开</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {filteredAssets.length > 0 ? (
+                <div className="min-h-0 flex-1">
+                  {state.viewMode === 'grid' ? <VirtualAssetGrid {...virtualProps} /> : <VirtualAssetList {...virtualProps} />}
+                </div>
+              ) : folderLoading ? (
+                <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-neutral-400"><Loader2 className="animate-spin" size={18} />正在读取文件夹…</div>
+              ) : null}
+            </div>
           )}
           {queryLoading && filteredAssets.length > 0 && (
             <div className="pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full border border-neutral-700 bg-[#1e1e1e]/95 px-3 py-1.5 text-xs text-neutral-300 shadow-xl">

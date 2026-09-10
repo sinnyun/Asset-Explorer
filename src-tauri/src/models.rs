@@ -176,6 +176,10 @@ pub struct AssetSummary {
     pub color: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    #[serde(rename = "tagIds")]
+    pub tag_ids: Vec<String>,
+    #[serde(rename = "collectionIds")]
+    pub collection_ids: Vec<String>,
     #[serde(rename = "recordVersion")]
     pub record_version: i64,
 }

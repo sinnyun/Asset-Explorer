@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { AssetState } from '../types';
 import { runtime } from '../services/api';
 import { dataService } from '../services/dataService';
+import { mergeFolderSummaries } from '../services/folderTree';
 
 export interface ScanProgress {
   active: boolean;
@@ -23,8 +24,26 @@ const idleProgress: ScanProgress = {
   status: 'scanning',
 };
 
-export function useScanMonitor(_setState: Dispatch<SetStateAction<AssetState>>) {
+export function useScanMonitor(setState: Dispatch<SetStateAction<AssetState>>) {
   const [progress, setProgress] = useState<ScanProgress>(idleProgress);
+
+  const refreshFolderCache = async () => {
+    try {
+      const [shell, rootPage] = await Promise.all([
+        dataService.getWorkspaceShell(),
+        dataService.queryFolders({ limit: 300 }),
+      ]);
+      setState(previous => ({
+        ...previous,
+        folders: mergeFolderSummaries(shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })), rootPage.items),
+        tags: shell.tags,
+        collections: shell.collections,
+        customSmartFolders: shell.smartFolders,
+      }));
+    } catch (error) {
+      console.warn('[ScanMonitor] 刷新文件夹缓存失败:', error);
+    }
+  };
 
   useEffect(() => {
     if (!runtime.isDesktop) return;
@@ -34,6 +53,7 @@ export function useScanMonitor(_setState: Dispatch<SetStateAction<AssetState>>) 
       const unStarted = await listen<{ path?: string }>('scan:started', event => {
         const path = event.payload?.path ?? '';
         setProgress(previous => ({ ...previous, active: true, path, done: 0, total: 0, status: 'scanning' }));
+        void refreshFolderCache();
       });
       const unProgress = await listen<{ done?: number }>('scan:progress', event => {
         setProgress(previous => ({ ...previous, done: event.payload?.done ?? previous.done }));
@@ -47,6 +67,7 @@ export function useScanMonitor(_setState: Dispatch<SetStateAction<AssetState>>) 
           done: totalFilesScanned,
           total: totalFilesScanned,
         }));
+        void refreshFolderCache();
         setTimeout(() => setProgress(previous => ({ ...previous, active: false })), 1500);
       });
       const unFailed = await listen<{ error?: string }>('scan:failed', event => {
