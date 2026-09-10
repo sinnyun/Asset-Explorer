@@ -31,6 +31,8 @@ interface MainAreaProps {
   onSelectFolder?: (id: string) => void;
   onAddMonitoredFolder?: () => void;
   onPreviewAsset?: (asset: Asset) => void;
+  folderCardDepth: number | typeof Infinity;
+  onFolderCardDepthChange: (depth: number | typeof Infinity) => void;
 }
 
 export function MainArea({
@@ -58,6 +60,8 @@ export function MainArea({
   onSelectFolder,
   onAddMonitoredFolder,
   onPreviewAsset,
+  folderCardDepth,
+  onFolderCardDepthChange,
 }: MainAreaProps) {
   const [search, setSearch] = React.useState('');
   const [splitView, setSplitView] = React.useState(false);
@@ -99,6 +103,29 @@ export function MainArea({
           >
             <FolderTree size={15} />{state.includeSubfolders ? '包含子文件夹' : '仅当前文件夹'}
           </button>
+          <div className="flex items-center gap-1 rounded-md border border-neutral-800 bg-[#1e1e1e] p-0.5" aria-label="文件夹卡片显示层级">
+            {[1, 2, 3, 4, 5, 6, 7, 8].map(depth => (
+              <button
+                key={depth}
+                type="button"
+                onClick={event => { event.stopPropagation(); onFolderCardDepthChange(depth); }}
+                className={cn(
+                  'min-w-5 rounded px-1.5 py-1 text-[11px] tabular-nums',
+                  folderCardDepth === depth ? 'bg-blue-500/20 text-blue-300' : 'text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200',
+                )}
+                title={`显示到第 ${depth} 层`}
+              >{depth}</button>
+            ))}
+            <button
+              type="button"
+              onClick={event => { event.stopPropagation(); onFolderCardDepthChange(Infinity); }}
+              className={cn(
+                'min-w-6 rounded px-1.5 py-1 text-[11px]',
+                folderCardDepth === Infinity ? 'bg-blue-500/20 text-blue-300' : 'text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200',
+              )}
+              title="显示全部层级"
+            >∞</button>
+          </div>
         </div>
 
         <div className="flex items-center gap-2">

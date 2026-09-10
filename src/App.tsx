@@ -22,6 +22,7 @@ import { useEntityActions } from './hooks/useEntityActions';
 import { useContextMenuHandlers } from './hooks/useContextMenuHandlers';
 import { useMiscActions } from './hooks/useMiscActions';
 import { dataService } from './services/dataService';
+import { filterFoldersByDepth } from './services/folderCardDepth';
 import { folderSummaryToFolder, mergeFolderSummaries } from './services/folderTree';
 import { runtime } from './services/api';
 import { handleConfirmAddAndScan as scanAndAddFolder } from './hooks/useFolderScan';
@@ -46,6 +47,7 @@ export default function App() {
   }>({ isOpen: false, title: '', initialValue: '', onConfirm: () => {} });
   // 全屏文件预览：双击资产时打开
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
+  const [folderCardDepth, setFolderCardDepth] = useState<number | typeof Infinity>(3);
 
   // 后台增量扫描监视：进度条 + 边扫边显示资产
   const { progress: scanProgress, startScan } = useScanMonitor(setState);
@@ -112,6 +114,14 @@ export default function App() {
   const filteredFolders = React.useMemo(
     () => folderResults.items.map(folderSummaryToFolder),
     [folderResults.items],
+  );
+  const middleFolderCards = React.useMemo(
+    () => filterFoldersByDepth(
+      state.folders.length > 0 ? state.folders : filteredFolders,
+      state.activeFolderId ?? undefined,
+      folderCardDepth,
+    ),
+    [state.folders, state.activeFolderId, filteredFolders, folderCardDepth],
   );
 
   // Legacy action panels temporarily consume only the bounded active query page,
@@ -253,7 +263,7 @@ export default function App() {
       <MainArea 
         state={state} 
         filteredAssets={filteredAssets} 
-        filteredFolders={filteredFolders}
+        filteredFolders={middleFolderCards}
         folderLoading={folderResults.loading}
         folderHasNextPage={folderResults.hasNextPage}
         onLoadNextFolderPage={folderResults.loadNextPage}
@@ -275,6 +285,8 @@ export default function App() {
         onSelectFolder={handleSelectFolder}
         onAddMonitoredFolder={handleScanLocalFolder}
         onPreviewAsset={(asset) => setPreviewAsset(asset)}
+        folderCardDepth={folderCardDepth}
+        onFolderCardDepthChange={setFolderCardDepth}
       />
       <PropertiesPanel 
         state={state} 

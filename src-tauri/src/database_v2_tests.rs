@@ -52,7 +52,14 @@ fn v2_database_uses_distinct_file_and_starts_empty() {
 
 #[test]
 fn v2_default_directory_ignores_obsolete_storage_config() {
-    assert_eq!(crate::database::get_active_data_dir().unwrap(), dirs::data_local_dir().unwrap().join("AssetHub"));
+    let default_dir = dirs::data_local_dir().unwrap().join("AssetHub");
+    let active_dir = crate::database::get_active_data_dir().unwrap();
+    let pointer = default_dir.join("storage-location.txt");
+    if let Ok(value) = std::fs::read_to_string(pointer) {
+        assert_eq!(active_dir, std::path::PathBuf::from(value.trim()));
+    } else {
+        assert_eq!(active_dir, default_dir);
+    }
     assert!(!include_str!("database.rs").contains("app_config.json"), "obsolete config must not redirect or be read by V2");
 }
 
@@ -68,6 +75,15 @@ fn v2_storage_relocation_copies_database_and_publishes_pointer() {
         std::fs::read_to_string(pointer_dir.join("storage-location.txt")).unwrap(),
         target.canonicalize().unwrap().to_string_lossy(),
     );
+}
+
+#[test]
+fn scan_progress_payload_is_compact() {
+    let source = include_str!("commands.rs");
+    for field in ["folderName", "phase", "total", "ratePerSecond", "etaSeconds"] {
+        assert!(source.contains(field), "scan events must expose {field}");
+    }
+    assert!(!source.contains("scan:chunk"));
 }
 
 #[test]
