@@ -10,7 +10,7 @@ import { initialSplitState, splitViewReducer } from '../src/components/splitView
 import { captureScrollPosition } from '../src/components/scrollPosition';
 import { buildGroupedAssetItems } from '../src/components/groupedAssetModel';
 import type { Asset, Folder } from '../src/types';
-import { folderSummaryToFolder, mergeFolderSummaries } from '../src/services/folderTree';
+import { collectFolderSubtreeIds, folderSummaryToFolder, mergeFolderSummaries } from '../src/services/folderTree';
 
 test('asset query clamps page size and removes empty optional values', () => {
   const query = normalizeAssetQuery({
@@ -175,6 +175,16 @@ test('folder summaries are converted into and merged with the sidebar folder cac
   assert.deepEqual(merged[0].tags, []);
 });
 
+test('removing a folder also removes its loaded descendant state', () => {
+  const folders = [
+    groupedFolder('root', 'D:/Root'),
+    { ...groupedFolder('child', 'D:/Root/Child'), parentId: 'root' },
+    { ...groupedFolder('grandchild', 'D:/Root/Child/Grandchild'), parentId: 'child' },
+    groupedFolder('sibling', 'D:/Sibling'),
+  ];
+  assert.deepEqual([...collectFolderSubtreeIds(folders, 'root')].sort(), ['child', 'grandchild', 'root']);
+});
+
 test('main workspace wires folder results into the folder view', () => {
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const mainSource = readFileSync(new URL('../src/components/MainArea.tsx', import.meta.url), 'utf8');
@@ -200,6 +210,15 @@ test('folder and split views preserve compact metadata', () => {
   assert.match(splitSource, /item\.tagIds/);
   assert.match(splitSource, /tagLabels/);
   assert.doesNotMatch(querySource, /listen\('scan:progress', invalidate\)/);
+});
+
+test('folder removal invalidates both the folder and asset query caches', () => {
+  const dataServiceSource = readFileSync(new URL('../src/services/dataService.ts', import.meta.url), 'utf8');
+  const assetQuerySource = readFileSync(new URL('../src/hooks/useAssetQuery.ts', import.meta.url), 'utf8');
+  const folderQuerySource = readFileSync(new URL('../src/hooks/useFolderQuery.ts', import.meta.url), 'utf8');
+  assert.match(dataServiceSource, /await apiClient\.deleteFolder\(id\)/);
+  assert.match(assetQuerySource, /folder:removed/);
+  assert.match(folderQuerySource, /folder:removed/);
 });
 
 function groupedAsset(id: string, folderId: string): Asset {

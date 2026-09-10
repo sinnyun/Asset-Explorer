@@ -1468,10 +1468,35 @@ impl Database {
     }
 
     pub fn delete_folder(&self, id: &str) -> Result<(), String> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM folders WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp_millis();
+        // Removing a monitored folder removes its indexed subtree from active
+        // results, but keeps the physical files and user metadata recoverable
+        // if the folder is added again later.
+        let assets = tx.execute(
+            "UPDATE assets SET deleted_at = ?1, record_version = record_version + 1
+             WHERE deleted_at IS NULL AND folder_id IN (
+               WITH RECURSIVE descendants(id) AS (
+                 SELECT id FROM folders WHERE id = ?2
+                 UNION ALL
+                 SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id
+               ) SELECT id FROM descendants
+             )",
+            params![now, id],
+        ).map_err(|e| e.to_string())?;
+        let folders = tx.execute(
+            "DELETE FROM folders WHERE id IN (
+               WITH RECURSIVE descendants(id) AS (
+                 SELECT id FROM folders WHERE id = ?1
+                 UNION ALL
+                 SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id
+               ) SELECT id FROM descendants
+             )",
+            params![id],
+        ).map_err(|e| e.to_string())?;
+        revision_after_mutation(&tx, assets + folders)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn update_folder(&self, folder: &Folder) -> Result<(), String> {

@@ -50,7 +50,7 @@ export function useFolderQuery(input: FolderQuery) {
   }, [nextCursor, query]);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    if (typeof window === 'undefined') return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stop: (() => void) | undefined;
@@ -61,16 +61,19 @@ export function useFolderQuery(input: FolderQuery) {
         timer = setTimeout(refresh, 120);
       };
       const stops = await Promise.all([
+        listen('folder:removed', invalidate),
         listen('scan:started', invalidate),
         listen('scan:finished', invalidate),
       ]);
       stop = () => stops.forEach(unlisten => unlisten());
       if (disposed) stop();
     }).catch(() => undefined);
+    window.addEventListener('folder:removed', invalidate);
     return () => {
       disposed = true;
       clearTimeout(timer);
       stop?.();
+      window.removeEventListener('folder:removed', invalidate);
     };
   }, [refresh]);
 

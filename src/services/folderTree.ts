@@ -25,3 +25,19 @@ export function mergeFolderSummaries(existing: Folder[], summaries: FolderSummar
   }
   return Array.from(byId.values());
 }
+
+/** Return the selected folder and every loaded descendant in the sidebar cache. */
+export function collectFolderSubtreeIds(folders: Folder[], rootId: string): Set<string> {
+  const ids = new Set<string>([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const folder of folders) {
+      if (folder.parentId && ids.has(folder.parentId) && !ids.has(folder.id)) {
+        ids.add(folder.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}

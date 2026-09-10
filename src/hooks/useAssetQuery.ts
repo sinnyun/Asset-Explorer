@@ -63,34 +63,37 @@ export function useAssetQuery(input: AssetQuery) {
   }, [nextCursor, query, queryKey]);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    if (typeof window === 'undefined') return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let unlisten: Array<() => void> = [];
-    import('@tauri-apps/api/event').then(async ({ listen }) => {
     const invalidate = () => {
-        if (disposed) return;
-        // Throttle invalidations during scans. File events can arrive many times
-        // per second; one bounded refresh window keeps the UI live without
-        // turning every event into another SQLite/HTTP page query.
-        if (timer) return;
-        timer = setTimeout(() => {
-          timer = undefined;
-          refresh();
-        }, 500);
-      };
+      if (disposed) return;
+      // Throttle invalidations during scans. File events can arrive many times
+      // per second; one bounded refresh window keeps the UI live without
+      // turning every event into another SQLite/HTTP page query.
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        refresh();
+      }, 500);
+    };
+    import('@tauri-apps/api/event').then(async ({ listen }) => {
       unlisten = await Promise.all([
+        listen('folder:removed', invalidate),
         listen('query:invalidated', invalidate),
         listen('scan:finished', invalidate),
         listen('asset:added', invalidate),
         listen('asset:modified', invalidate),
         listen('asset:removed', invalidate),
       ]);
-    });
+    }).catch(() => undefined);
+    window.addEventListener('folder:removed', invalidate);
     return () => {
       disposed = true;
       clearTimeout(timer);
       unlisten.forEach(stop => stop());
+      window.removeEventListener('folder:removed', invalidate);
     };
   }, [refresh]);
 

@@ -180,7 +180,12 @@ class DataService {
 
   /** 删除文件夹 */
   async deleteFolder(id: string): Promise<void> {
-    apiClient.deleteFolder(id).catch(console.error);
+    await apiClient.deleteFolder(id);
+    // Web 模式没有 Tauri 的事件总线；统一发一个浏览器事件，让查询缓存
+    // 与侧边栏在删除完成后立即失效，而不是等待下一次扫描或重启。
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('folder:removed', { detail: { id } }));
+    }
   }
 
   // ------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import express from 'express';
 import { db } from '../db/index.ts';
 import { folders } from '../db/schema.ts';
-import { eq, and, asc } from 'drizzle-orm';
+import { eq, and, asc, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { requireAuth, AuthRequest } from '../middleware/auth.ts';
 
@@ -74,8 +74,24 @@ folderRouter.delete("/folders/:id", requireAuth, async (req: AuthRequest, res) =
   try {
     const userId = req.user!.uid;
     const id = paramId(req);
-    await db.delete(folders)
-      .where(and(eq(folders.id, id), eq(folders.userId, userId)));
+    await db.transaction(async (tx) => {
+      const subtree = sql`WITH RECURSIVE descendants(id) AS (
+        SELECT id FROM folders WHERE id = ${id} AND user_id = ${userId}
+        UNION ALL
+        SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id
+        WHERE f.user_id = ${userId}
+      ) SELECT id FROM descendants`;
+      // Explicitly remove relation rows first because the web schema does not
+      // rely on cascading foreign keys for asset-folder deletion.
+      await tx.execute(sql`DELETE FROM asset_tags
+        WHERE asset_id IN (SELECT id FROM assets WHERE user_id = ${userId} AND folder_id IN (${subtree}))`);
+      await tx.execute(sql`DELETE FROM asset_collections
+        WHERE asset_id IN (SELECT id FROM assets WHERE user_id = ${userId} AND folder_id IN (${subtree}))`);
+      await tx.execute(sql`DELETE FROM assets
+        WHERE user_id = ${userId} AND folder_id IN (${subtree})`);
+      await tx.execute(sql`DELETE FROM folders
+        WHERE user_id = ${userId} AND id IN (${subtree})`);
+    });
     res.json({ success: true });
   } catch (error: any) {
     console.error("[API] 删除文件夹失败:", error);

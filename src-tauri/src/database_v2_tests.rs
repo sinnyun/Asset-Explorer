@@ -392,6 +392,31 @@ fn folder_writers_normalize_and_preserve_children() {
 }
 
 #[test]
+fn explicit_folder_removal_hides_assets_in_the_entire_subtree() {
+    let (dir, db) = test_db("delete-folder-subtree");
+    let root = folder("root", r"D:\Assets");
+    db.insert_folder(&root).unwrap();
+    let mut child = folder("child", r"D:\Assets\Child");
+    child.parent_id = Some(root.id.clone());
+    db.insert_folder(&child).unwrap();
+
+    let mut root_asset = fact("root-asset", r"D:\Assets\root.png", 10, 10);
+    root_asset.folder_id = Some(root.id.clone());
+    let mut child_asset = fact("child-asset", r"D:\Assets\Child\child.png", 20, 20);
+    child_asset.folder_id = Some(child.id.clone());
+    db.upsert_file_facts(&[root_asset, child_asset]).unwrap();
+
+    db.delete_folder("root").unwrap();
+
+    let conn = connection(&dir);
+    assert_eq!(number(&conn, "SELECT count(*) FROM folders"), 0);
+    assert_eq!(number(&conn, "SELECT count(*) FROM assets WHERE deleted_at IS NULL"), 0);
+    assert_eq!(number(&conn, "SELECT count(*) FROM assets WHERE deleted_at IS NOT NULL"), 2);
+    assert!(db.get_asset_detail("root-asset").unwrap().is_none());
+    assert!(db.get_asset_detail("child-asset").unwrap().is_none());
+}
+
+#[test]
 fn folder_update_normalizes_existing_v2_rows() {
     let (dir, db) = test_db("folder-update");
     connection(&dir).execute(r"INSERT INTO folders(id,name,path,normalized_path) VALUES ('root','root','D:/Old','d:\old')", []).unwrap();

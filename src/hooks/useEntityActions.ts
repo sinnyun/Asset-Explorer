@@ -5,6 +5,7 @@
 import type React from 'react';
 import type { SmartFolder, SortOption, Tag, Collection, Folder as FolderType } from '../types';
 import { dataService } from '../services/dataService';
+import { collectFolderSubtreeIds } from '../services/folderTree';
 
 /**
  * 实体 CRUD 操作管理
@@ -200,14 +201,27 @@ export function useEntityActions(
     });
   };
 
-  const handleDeleteFolder = (id: string) => {
-    dataService.deleteFolder(id);
-    setState(prev => ({
-      ...prev,
-      folders: prev.folders.filter(f => f.id !== id),
-      selectedItems: prev.selectedItems.filter(i => !(i.type === 'folder' && i.id === id)),
-      activeFolderId: prev.activeFolderId === id ? null : prev.activeFolderId
-    }));
+  const handleDeleteFolder = async (id: string) => {
+    try {
+      await dataService.deleteFolder(id);
+    } catch (error) {
+      console.error('[EntityActions] 删除文件夹失败:', error);
+      return;
+    }
+    setState(prev => {
+      const removedIds = collectFolderSubtreeIds(prev.folders, id);
+      return {
+        ...prev,
+        folders: prev.folders.filter(folder => !removedIds.has(folder.id)),
+        assets: prev.assets.filter(asset => !removedIds.has(asset.folderId)),
+        selectedItems: prev.selectedItems.filter(item =>
+          item.type !== 'folder' || !removedIds.has(item.id),
+        ),
+        activeFolderId: prev.activeFolderId && removedIds.has(prev.activeFolderId)
+          ? null
+          : prev.activeFolderId,
+      };
+    });
   };
 
   const handleMoveFolder = (id: string, direction: 'up' | 'down') => {
