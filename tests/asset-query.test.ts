@@ -234,3 +234,8 @@ test('main area routes standard assets through the grouped virtual view', () => 
   assert.match(source, /collapsedGroupIds/);
   assert.match(source, /onToggleGroupCollapse/);
 });
+
+test('grouped virtual view captures scroll position before React releases the event', () => {
+  const source = readFileSync(new URL('../src/components/VirtualGroupedAssetView.tsx', import.meta.url), 'utf8');
+  assert.match(source, /captureScrollPosition/);
+});

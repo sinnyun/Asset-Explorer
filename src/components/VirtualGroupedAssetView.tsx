@@ -4,6 +4,7 @@ import type { Asset, Folder, SortOption } from '../types';
 import type { GroupedAssetItem } from './groupedAssetModel';
 import { cn, formatBytes } from '../lib/utils';
 import { ThumbnailImage } from './ThumbnailImage';
+import { captureScrollPosition } from './scrollPosition';
 
 interface Props {
   items: GroupedAssetItem[];
@@ -94,7 +95,7 @@ export function VirtualGroupedAssetView({
   }, [hasNextPage, last, loading, onLoadNextPage, rows.length]);
 
   return (
-    <div ref={viewportRef} className="h-full overflow-y-auto custom-scrollbar" onScroll={event => setViewport(current => ({ ...current, scrollTop: event.currentTarget.scrollTop }))}>
+    <div ref={viewportRef} className="h-full overflow-y-auto custom-scrollbar" onScroll={event => captureScrollPosition(setViewport, event)}>
       <div className="relative" style={{ height: offsets.total }}>
         {rows.slice(first, last).map((row, index) => {
           const rowIndex = first + index;
