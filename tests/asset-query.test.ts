@@ -239,3 +239,11 @@ test('grouped virtual view captures scroll position before React releases the ev
   const source = readFileSync(new URL('../src/components/VirtualGroupedAssetView.tsx', import.meta.url), 'utf8');
   assert.match(source, /captureScrollPosition/);
 });
+
+test('grouped cards keep the legacy tag and collection badge treatment', () => {
+  const source = readFileSync(new URL('../src/components/VirtualGroupedAssetView.tsx', import.meta.url), 'utf8');
+  assert.match(source, /AdaptiveTagRow/);
+  assert.match(source, /bg-amber-500\/10/);
+  assert.match(source, /asset\.collections\.length - 1/);
+  assert.match(source, /无标签/);
+});

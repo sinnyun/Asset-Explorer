@@ -65,7 +65,7 @@ export function MainArea({
     () => new Set(state.selectedItems.filter(item => item.type === 'asset').map(item => item.id)),
     [state.selectedItems],
   );
-  const tagLabels = React.useMemo(() => new Map(state.tags.map(tag => [tag.id, tag.name])), [state.tags]);
+  const tagMap = React.useMemo(() => new Map(state.tags.map(tag => [tag.id, tag])), [state.tags]);
   const collectionLabels = React.useMemo(() => new Map(state.collections.map(collection => [collection.id, collection.name])), [state.collections]);
   const selectedFolderIds = React.useMemo(
     () => new Set(state.selectedItems.filter(item => item.type === 'folder').map(item => item.id)),
@@ -133,7 +133,7 @@ export function MainArea({
           onToggleSelection={onToggleSelection}
           onContextMenuAsset={onContextMenuAsset}
           onPreviewAsset={onPreviewAsset}
-          tagLabels={tagLabels}
+          tagLabels={new Map([...tagMap].map(([id, tag]) => [id, tag.name]))}
           collectionLabels={collectionLabels}
         />
       ) : (
@@ -198,7 +198,7 @@ export function MainArea({
                     onContextMenuFolder={onContextMenuFolder}
                     onPreviewAsset={onPreviewAsset}
                     onToggleGroupCollapse={onToggleGroupCollapse}
-                    tagLabels={tagLabels}
+                    tagMap={tagMap}
                     collectionLabels={collectionLabels}
                   />
                 </div>
