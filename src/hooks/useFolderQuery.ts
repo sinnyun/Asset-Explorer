@@ -54,12 +54,12 @@ export function useFolderQuery(input: FolderQuery) {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stop: (() => void) | undefined;
+    const invalidate = () => {
+      if (disposed) return;
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 120);
+    };
     import('@tauri-apps/api/event').then(async ({ listen }) => {
-      const invalidate = () => {
-        if (disposed) return;
-        clearTimeout(timer);
-        timer = setTimeout(refresh, 120);
-      };
       const stops = await Promise.all([
         listen('folder:removed', invalidate),
         listen('scan:started', invalidate),
