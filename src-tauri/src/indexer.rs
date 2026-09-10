@@ -5,13 +5,34 @@
 //! ============================================================================
 
 use crate::metadata_extractor;
-use crate::models::{Asset, Folder, ScanResult};
+use crate::models::{Asset, Folder};
+#[cfg(test)]
+use crate::models::ScanResult;
 use chrono::Utc;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+pub const SCAN_BATCH_SIZE: usize = 200;
+
+#[derive(Debug, Clone)]
+pub struct StreamingScanSummary {
+    pub root_folder: Folder,
+    pub total_files_scanned: usize,
+    pub total_duration_ms: u128,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScanBatch {
+    Started(Folder),
+    Folders(Vec<Folder>),
+    Assets(Vec<Asset>),
+    Progress(usize),
+    Finished(StreamingScanSummary),
+}
 
 /// 检查路径是否为应忽略的隐藏目录或常见构建缓存
 /// 额外使用 ignore 开源库的 WalkBuilder 支持 .gitignore 规则
@@ -88,7 +109,7 @@ pub fn infer_category_from_extension(ext: &str) -> &'static str {
 /// 取 SHA-256 前 8 字节（16 hex 字符），确保 ID 稳定且紧凑
 pub fn stable_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
+    hasher.update(crate::database::normalize_windows_path(input).as_bytes());
     let result = hasher.finalize();
     hex::encode(&result[..8])
 }
@@ -105,8 +126,9 @@ fn build_asset(
     path_to_id: &std::collections::HashMap<PathBuf, String>,
     root_id: &str,
     now_str: &str,
-) -> Option<Asset> {
-    let metadata = fs::metadata(file_path).ok()?;
+) -> Result<Asset, String> {
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| format!("读取扫描文件 {} 失败: {e}", file_path.display()))?;
     let file_size = metadata.len();
     let file_str = file_path.to_string_lossy().to_string();
 
@@ -151,7 +173,7 @@ fn build_asset(
         (None, None)
     };
 
-    Some(Asset {
+    Ok(Asset {
         id,
         name: file_name,
         path: file_str,
@@ -172,10 +194,149 @@ fn build_asset(
     })
 }
 
+/// Walk and process one bounded batch at a time. The returned value contains
+/// only summary data; file and folder snapshots are never retained.
+pub fn scan_local_directory_streaming(
+    root_path_str: &str,
+    cancelled: &AtomicBool,
+    on_batch: &mut dyn FnMut(ScanBatch) -> Result<(), String>,
+) -> Result<StreamingScanSummary, String> {
+    scan_local_path_streaming(root_path_str, true, cancelled, on_batch)
+}
+
+pub fn scan_local_subtree_streaming(
+    root_path_str: &str,
+    cancelled: &AtomicBool,
+    on_batch: &mut dyn FnMut(ScanBatch) -> Result<(), String>,
+) -> Result<StreamingScanSummary, String> {
+    scan_local_path_streaming(root_path_str, false, cancelled, on_batch)
+}
+
+fn scan_local_path_streaming(
+    root_path_str: &str,
+    is_monitored_root: bool,
+    cancelled: &AtomicBool,
+    on_batch: &mut dyn FnMut(ScanBatch) -> Result<(), String>,
+) -> Result<StreamingScanSummary, String> {
+    let started_at = Instant::now();
+    let root_path = PathBuf::from(root_path_str);
+    if !root_path.exists() {
+        return Err(format!("目录不存在: {root_path_str}"));
+    }
+    if !root_path.is_dir() {
+        return Err(format!("路径不是有效目录: {root_path_str}"));
+    }
+
+    let root_id = if is_monitored_root {
+        format!("f_root_{}", stable_hash(root_path_str))
+    } else {
+        format!("f_{}", stable_hash(root_path_str))
+    };
+    let root_folder = Folder {
+        id: root_id.clone(),
+        name: root_path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| root_path_str.to_string()),
+        path: root_path_str.to_string(),
+        parent_id: None,
+        is_monitored: is_monitored_root,
+        asset_count: None,
+        mtime: None,
+    };
+    on_batch(ScanBatch::Started(root_folder.clone()))?;
+
+    let mut path_to_id = std::collections::HashMap::new();
+    path_to_id.insert(root_path.clone(), root_id.clone());
+    let mut folder_batch = Vec::with_capacity(SCAN_BATCH_SIZE);
+    let mut file_batch = Vec::with_capacity(SCAN_BATCH_SIZE);
+    let mut processed = 0usize;
+    let now = Utc::now().to_rfc3339();
+
+    let walker = ignore::WalkBuilder::new(&root_path)
+        .min_depth(Some(1))
+        .hidden(false)
+        .parents(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .filter_entry(|entry| !is_ignored_entry(entry))
+        .build();
+
+    for entry_result in walker {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("scan cancelled".to_string());
+        }
+        let entry = entry_result.map_err(|error| format!("扫描目录遍历失败: {error}"))?;
+        let path = entry.path().to_path_buf();
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            let path_text = path.to_string_lossy().to_string();
+            let id = format!("f_{}", stable_hash(&path_text));
+            let parent_id = path.parent()
+                .and_then(|parent| path_to_id.get(parent).cloned())
+                .or_else(|| Some(root_id.clone()));
+            path_to_id.insert(path.clone(), id.clone());
+            folder_batch.push(Folder {
+                id,
+                name: path.file_name().map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Folder".to_string()),
+                path: path_text,
+                parent_id,
+                is_monitored: false,
+                asset_count: None,
+                mtime: None,
+            });
+            if folder_batch.len() == SCAN_BATCH_SIZE {
+                on_batch(ScanBatch::Folders(std::mem::take(&mut folder_batch)))?;
+                folder_batch = Vec::with_capacity(SCAN_BATCH_SIZE);
+            }
+        } else if entry.file_type().is_some_and(|kind| kind.is_file()) {
+            if !folder_batch.is_empty() {
+                on_batch(ScanBatch::Folders(std::mem::take(&mut folder_batch)))?;
+                folder_batch = Vec::with_capacity(SCAN_BATCH_SIZE);
+            }
+            file_batch.push(path);
+            if file_batch.len() == SCAN_BATCH_SIZE {
+                let assets = file_batch.par_iter()
+                    .map(|path| build_asset(path, &path_to_id, &root_id, &now))
+                    .collect::<Result<Vec<_>, _>>()?;
+                processed += assets.len();
+                on_batch(ScanBatch::Assets(assets))?;
+                on_batch(ScanBatch::Progress(processed))?;
+                file_batch.clear();
+            }
+        }
+    }
+
+    if !folder_batch.is_empty() {
+        on_batch(ScanBatch::Folders(folder_batch))?;
+    }
+    if !file_batch.is_empty() {
+        let assets = file_batch.par_iter()
+            .map(|path| build_asset(path, &path_to_id, &root_id, &now))
+            .collect::<Result<Vec<_>, _>>()?;
+        processed += assets.len();
+        on_batch(ScanBatch::Assets(assets))?;
+        on_batch(ScanBatch::Progress(processed))?;
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err("scan cancelled".to_string());
+    }
+
+    let summary = StreamingScanSummary {
+        root_folder,
+        total_files_scanned: processed,
+        total_duration_ms: started_at.elapsed().as_millis(),
+    };
+    on_batch(ScanBatch::Finished(summary.clone()))?;
+    Ok(summary)
+}
+
 
 /// 扫描指定本地目录并返回完整的文件夹树与资产列表
 /// 使用 ignore::WalkBuilder 支持 .gitignore 规则
 /// 使用多线程加速处理与元数据获取
+#[cfg(test)]
 pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
     let start_time = Instant::now();
     let root_path = PathBuf::from(root_path_str);
@@ -234,7 +395,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
                 }
             }
             Err(e) => {
-                eprintln!("[Indexer] 遍历警告: {}", e);
+                return Err(format!("扫描目录遍历失败: {e}"));
             }
         }
     }
@@ -276,8 +437,8 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
 
     let assets: Vec<Asset> = discovered_files
         .par_iter()
-        .filter_map(|file_path| build_asset(file_path, &path_to_id, &root_id, &now_str))
-        .collect();
+        .map(|file_path| build_asset(file_path, &path_to_id, &root_id, &now_str))
+        .collect::<Result<Vec<_>, _>>()?;
 
 
     let total_scanned = assets.len();
@@ -306,6 +467,8 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
 ///
 /// on_start：目录树构建完成、资产分批前回调，用于先持久化并广播根目录/子目录与文件总数。
 /// on_chunk：每解析完一批资产回调，用于增量写库并上报进度，实现边扫边显示。
+#[cfg(test)]
+#[cfg(test)]
 pub fn scan_local_directory_incremental(
     root_path_str: &str,
     on_start: &mut dyn FnMut(&Folder, &[Folder], usize) -> Result<(), String>,
@@ -364,7 +527,7 @@ pub fn scan_local_directory_incremental(
                 }
             }
             Err(e) => {
-                eprintln!("[Indexer] 遍历警告: {}", e);
+                return Err(format!("扫描目录遍历失败: {e}"));
             }
         }
     }
@@ -414,8 +577,8 @@ pub fn scan_local_directory_incremental(
     for chunk in discovered_files.chunks(CHUNK_SIZE) {
         let assets_in_chunk: Vec<Asset> = chunk
             .par_iter()
-            .filter_map(|fp| build_asset(fp, &path_to_id, &root_id, &now_str))
-            .collect();
+            .map(|fp| build_asset(fp, &path_to_id, &root_id, &now_str))
+            .collect::<Result<Vec<_>, _>>()?;
         processed += assets_in_chunk.len();
         // 调用方增量写库并推送进度 / 资产
         on_chunk(&assets_in_chunk, processed, total_files)?;

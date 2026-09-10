@@ -55,33 +55,20 @@ export function useAppState() {
   const [state, setState] = useState<AssetState>(getInitialState);
   const loadAttemptRef = useRef(0);
 
-  // 1. 初始化从后端异步加载全量数据 (非阻塞，只加载一次)
+  // Load only the compact workspace shell. Asset rows are owned by useAssetQuery.
   useEffect(() => {
     const loadOnce = async () => {
       loadAttemptRef.current += 1;
       try {
-        const loaded = await dataService.loadWorkspace();
-        // 已成功取得数据（即使为空也是成功响应，无需重试）
-        if (loaded && ('assets' in loaded || 'folders' in loaded)) {
-          // assets 按 id 去重后再合并：虽然 DB 层有 PRIMARY KEY 约束不产生重复，
-          // 但 loadWorkspace 返回的数据可能会与已通过 scan:chunk/asset:added 事件
-          // 进入 state 的资产叠加，确保 assets 数组内 id 全局唯一。
-          if (Array.isArray(loaded.assets) && loaded.assets.length > 0) {
-            const seen = new Set<string>();
-            const deduped = loaded.assets.filter((a: any) => {
-              if (!a?.id || seen.has(a.id)) return false;
-              seen.add(a.id);
-              return true;
-            });
-            if (deduped.length !== loaded.assets.length) {
-              loaded.assets = deduped;
-            }
-          }
-          setState(prev => ({ ...prev, ...loaded }));
-        } else if (loadAttemptRef.current < 3) {
-          // loadWorkspace 返回 null/undefined → IPC 可能尚未就绪，延迟重试
-          setTimeout(loadOnce, 800);
-        }
+        const shell = await dataService.getWorkspaceShell();
+        setState(prev => ({
+          ...prev,
+          folders: shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })),
+          tags: shell.tags,
+          collections: shell.collections,
+          customSmartFolders: shell.smartFolders,
+          assets: [],
+        }));
       } catch (err) {
         console.error('[App] 初始化加载工作区数据失败:', err);
         if (loadAttemptRef.current < 3) {

@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "start": "node dist/server.cjs",
     "db:push": "drizzle-kit push --config=src/db/drizzle.config.ts",
+    "test:ts": "node --import tsx --test tests/**/*.test.ts",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "tauri": "tauri",

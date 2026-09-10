@@ -15,8 +15,7 @@ import { RenameModal } from './components/RenameModal';
 import { AssetPreviewOverlay } from './components/preview/AssetPreviewOverlay';
 import { smartFolders } from './data';
 import { useAppState } from './hooks/useAppState';
-import { useFileMonitoring } from './hooks/useFileMonitoring';
-import { useAssetFiltering } from './hooks/useAssetFiltering';
+import { useAssetQuery } from './hooks/useAssetQuery';
 import { useNavigationActions } from './hooks/useNavigationActions';
 import { useEntityActions } from './hooks/useEntityActions';
 import { useContextMenuHandlers } from './hooks/useContextMenuHandlers';
@@ -46,8 +45,6 @@ export default function App() {
   // 全屏文件预览：双击资产时打开
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
 
-  useFileMonitoring(setState);
-
   // 后台增量扫描监视：进度条 + 边扫边显示资产
   const { progress: scanProgress, startScan } = useScanMonitor(setState);
 
@@ -69,8 +66,43 @@ export default function App() {
     handleSearchSubmit,
   } = useEntityActions(setState);
 
-  // 过滤
-  const { filteredAssets, filteredFolders } = useAssetFiltering(state, smartFolders);
+  const assetQuery = React.useMemo(() => ({
+    folderId: state.activeFolderId ?? undefined,
+    includeDescendants: state.includeSubfolders,
+    search: state.searchQuery || undefined,
+    tagIds: state.activeTagId ? [state.activeTagId] : [],
+    collectionIds: state.activeCollectionId ? [state.activeCollectionId] : [],
+    sort: state.sortOption.replace('date_modified', 'modified') as import('./types').AssetSort,
+    limit: 300,
+  }), [
+    state.activeFolderId, state.includeSubfolders, state.searchQuery,
+    state.activeTagId, state.activeCollectionId, state.sortOption,
+  ]);
+  const assetResults = useAssetQuery(assetQuery);
+  const filteredAssets = React.useMemo<Asset[]>(() => assetResults.items.map(item => {
+    const dateModified = new Date(Math.max(0, item.mtimeNs / 1_000_000)).toISOString();
+    return {
+      id: item.id,
+      name: item.name,
+      path: item.path,
+      type: item.type as Asset['type'],
+      size: item.size,
+      folderId: item.folderId ?? '',
+      dateModified,
+      dateAdded: dateModified,
+      tags: [],
+      collections: [],
+      width: item.width,
+      height: item.height,
+    };
+  }), [assetResults.items]);
+  const filteredFolders: import('./types').Folder[] = [];
+
+  // Legacy action panels temporarily consume only the bounded active query page,
+  // never the complete database table.
+  React.useEffect(() => {
+    setState(prev => ({ ...prev, assets: filteredAssets }));
+  }, [filteredAssets, setState]);
 
   // 创建/批量/设置操作
   const {
@@ -80,19 +112,27 @@ export default function App() {
 
   // 单资产标签/集合关联编辑（右侧详情面板底部）
   const updateAssetTags = (assetId: string, tagIds: string[]) => {
+    const previous = state.assets.find(asset => asset.id === assetId)?.tags ?? [];
     setState(prev => ({
       ...prev,
       assets: prev.assets.map(a => a.id === assetId ? { ...a, tags: tagIds } : a)
     }));
-    dataService.syncAssetTags(assetId, tagIds).catch(console.error);
+    dataService.syncAssetTags(assetId, tagIds).catch(error => {
+      console.error(error);
+      setState(prev => ({ ...prev, assets: prev.assets.map(asset => asset.id === assetId ? { ...asset, tags: previous } : asset) }));
+    });
   };
 
   const updateAssetCollections = (assetId: string, collectionIds: string[]) => {
+    const previous = state.assets.find(asset => asset.id === assetId)?.collections ?? [];
     setState(prev => ({
       ...prev,
       assets: prev.assets.map(a => a.id === assetId ? { ...a, collections: collectionIds } : a)
     }));
-    dataService.syncAssetCollections(assetId, collectionIds).catch(console.error);
+    dataService.syncAssetCollections(assetId, collectionIds).catch(error => {
+      console.error(error);
+      setState(prev => ({ ...prev, assets: prev.assets.map(asset => asset.id === assetId ? { ...asset, collections: previous } : asset) }));
+    });
   };
 
   // 右键菜单操作
@@ -144,10 +184,15 @@ export default function App() {
 
   const handleReloadWorkspace = async () => {
     try {
-      const loaded = await dataService.loadWorkspace();
-      if (loaded && ('assets' in loaded || 'folders' in loaded)) {
-        setState(prev => ({ ...prev, ...loaded }));
-      }
+      const shell = await dataService.getWorkspaceShell();
+      setState(prev => ({
+        ...prev,
+        folders: shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })),
+        tags: shell.tags,
+        collections: shell.collections,
+        customSmartFolders: shell.smartFolders,
+      }));
+      assetResults.refresh();
     } catch (err) {
       console.error('[App] 重新加载工作区失败:', err);
     }
@@ -180,6 +225,10 @@ export default function App() {
         state={state} 
         filteredAssets={filteredAssets} 
         filteredFolders={filteredFolders}
+        queryLoading={assetResults.loading}
+        queryError={assetResults.error}
+        hasNextPage={assetResults.hasNextPage}
+        onLoadNextPage={assetResults.loadNextPage}
         onToggleSelection={handleToggleSelection}
         onClearSelection={handleClearSelection}
         onChangeView={handleChangeView}

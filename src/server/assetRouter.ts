@@ -1,7 +1,7 @@
 import express from 'express';
 import { db } from '../db/index.ts';
 import { assets, assetTags, assetCollections } from '../db/schema.ts';
-import { eq, and, desc, inArray } from 'drizzle-orm';
+import { eq, and, desc, inArray, sql } from 'drizzle-orm';
 import { requireAuth, AuthRequest } from '../middleware/auth.ts';
 
 export const assetRouter = express.Router();
@@ -38,12 +38,34 @@ assetRouter.patch("/assets/:id/rating", requireAuth, async (req: AuthRequest, re
   try {
     const userId = req.user!.uid;
     const id = paramId(req);
-    const { rating } = req.body;
-    // 注意：assets 表 schema 中没有 rating 字段，此处保留 API 以便后续扩展
+    const rating = Math.max(0, Math.min(5, Math.floor(Number(req.body?.rating))));
+    if (!Number.isFinite(rating)) return res.status(400).json({ error: 'rating must be a number' });
+    const rows = await db.update(assets)
+      .set({ rating, recordVersion: sql`${assets.recordVersion} + 1` })
+      .where(and(eq(assets.id, id), eq(assets.userId, userId)))
+      .returning({ id: assets.id });
+    if (rows.length === 0) return res.status(404).json({ error: 'Asset not found' });
     res.json({ success: true, id, rating });
   } catch (error: any) {
     console.error("[API] 更新资产评分失败:", error);
     res.status(500).json({ error: error.message || "Failed to update asset rating" });
+  }
+});
+
+assetRouter.patch("/assets/:id/favorite", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const id = paramId(req);
+    if (typeof req.body?.favorite !== 'boolean') return res.status(400).json({ error: 'favorite must be boolean' });
+    const rows = await db.update(assets)
+      .set({ favorite: req.body.favorite, recordVersion: sql`${assets.recordVersion} + 1` })
+      .where(and(eq(assets.id, id), eq(assets.userId, userId)))
+      .returning({ id: assets.id });
+    if (rows.length === 0) return res.status(404).json({ error: 'Asset not found' });
+    res.json({ success: true, id, favorite: req.body.favorite });
+  } catch (error: any) {
+    console.error("[API] 更新资产收藏失败:", error);
+    res.status(500).json({ error: error.message || "Failed to update asset favorite" });
   }
 });
 

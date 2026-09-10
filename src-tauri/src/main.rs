@@ -1,42 +1,46 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod aggregator;
+mod asset_query;
 mod commands;
 mod database;
+mod event_coalescer;
+mod index_jobs;
 mod indexer;
 mod metadata_extractor;
+mod metrics;
 mod models;
+mod preview_stream;
 mod sync;
 mod thumbnail_cache;
+mod thumbnail_jobs;
 mod watcher;
+
+#[cfg(test)]
+mod database_v2_tests;
 
 use commands::*;
 use database::Database;
+use index_jobs::IndexCoordinator;
+use thumbnail_jobs::ThumbnailCoordinator;
 use std::sync::Arc;
 use tauri::Manager;
 use watcher::WatcherRegistry;
 
 fn main() {
-    // 初始化本地 SQLite 数据库 (高并发 WAL 模式)
-    // 若主库文件损坏或无法打开，自动备份原文件并重建全新数据库；
-    // 仅在极端异常（文件系统问题等）下回退到内存模式，仍保持有效 data_dir。
-    let db = match Database::init() {
+    // Open only the V2 database. Report initialization failure visibly before exiting.
+    let db = match Database::init_v2() {
         Ok(db) => db,
-        Err(err) => {
-            eprintln!("[Warning] 本地文件数据库初始化失败，尝试重建: {}", err);
-            match Database::init() {
-                Ok(db) => db,
-                Err(err2) => {
-                    eprintln!("[Warning] 重建文件数据库仍失败，切换至内存模式: {}", err2);
-                    Database::init_in_memory(None).expect("初始化数据库失败")
-                }
-            }
+        Err(error) => {
+            show_initialization_error(&error);
+            std::process::exit(1);
         }
     };
 
     // 克隆一份用于 setup 闭包，避免 move 后 on_window_event 无法使用
     let db_for_setup = db.clone();
+    let index_coordinator = IndexCoordinator::new(2, 32);
+    let coordinator_for_setup = index_coordinator.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -53,14 +57,19 @@ fn main() {
             println!("[SingleInstance] 检测到已有 AssetHub 实例正在运行，已唤醒已有窗口，新进程自动退出。");
         }))
         .manage(db.clone())
-        // ====================================================================
-        // 机制 2：启动时自动校验资产有效性并挂载文件监听器
-        // ====================================================================
+        .manage(index_coordinator)
+        .manage(ThumbnailCoordinator::new(2, 512))
+        // Startup only opens storage and registers watchers. Expensive filesystem
+        // maintenance is always an explicit, cancellable job.
         .setup(move |app| {
             println!("[Startup] Tauri 应用启动中，开始初始化监控...");
             // 创建全局文件监控注册表，支持运行时动态添加/移除监控文件夹
             let app_handle = app.handle().clone();
-            match WatcherRegistry::new(app_handle.clone(), Arc::new(db_for_setup.clone())) {
+            match WatcherRegistry::new(
+                app_handle.clone(),
+                Arc::new(db_for_setup.clone()),
+                coordinator_for_setup.clone(),
+            ) {
                 Ok(registry) => {
                     app.manage(registry);
                     println!("[Startup] 文件监控器初始化完成");
@@ -70,39 +79,6 @@ fn main() {
                 }
             }
 
-            // 后台周期对账兜底：每 5s 对全部已监控根目录做一次实时递归对账，
-            // 纠正外部工具批量写入或 notify 事件队列可能存在的漏检。
-            let per_app = app_handle.clone();
-            let per_db = db_for_setup.clone();
-            std::thread::spawn(move || {
-                use crate::sync::{reconcile_root, ReconcileMode};
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    if let Ok(folders) = per_db.get_monitored_folders() {
-                        for f in &folders {
-                            let p = std::path::Path::new(&f.path);
-                            if p.exists() && p.is_dir() {
-                                let _ = reconcile_root(&per_app, &per_db, p, ReconcileMode::Deep);
-                            }
-                        }
-                    }
-                }
-            });
-
-            // 资产有效性校验移至后台线程异步执行，不阻塞 Tauri 主线程与首帧渲染
-            // 前端 useAppState 不再调用 validate_assets + 二次 loadWorkspace，
-            // 避免每次启动都做全量数据拉取两次。
-            let validate_db = db_for_setup.clone();
-            std::thread::spawn(move || {
-                match validate_db.validate_assets() {
-                    Ok((total, deleted)) => {
-                        println!("[Startup] 启动资产校验完成: 检查 {} 个资产, 清理了 {} 个无效路径", total, deleted);
-                    }
-                    Err(e) => {
-                        eprintln!("[Startup] 启动资产校验失败: {}", e);
-                    }
-                }
-            });
             println!("[Startup] Tauri 初始化完成，开始监听窗口事件...");
             Ok(())
         })
@@ -118,35 +94,21 @@ fn main() {
                 // 终止当前进程及其派生线程，避免僵尸进程遗留
                 std::process::exit(0);
             }
-            // 窗口重新获得焦点时，做一次廉价剪枝对账兜底，确保用户回到应用后
-            // 界面与磁盘一致（覆盖来自外部资源管理器等在中途的目录增删改）。
-            if let tauri::WindowEvent::Focused(true) = event {
-                if _window.label() == "main" {
-                    let focus_app = _window.app_handle().clone();
-                    let focus_db = db.clone();
-                    std::thread::spawn(move || {
-                        use crate::sync::{reconcile_root, ReconcileMode};
-                        if let Ok(folders) = focus_db.get_monitored_folders() {
-                            for f in &folders {
-                                let p = std::path::Path::new(&f.path);
-                                if p.exists() {
-                                    let _ = reconcile_root(&focus_app, &focus_db, p, ReconcileMode::Pruned);
-                                }
-                            }
-                        }
-                    });
-                }
-            }
         })
         .invoke_handler(tauri::generate_handler![
-            load_workspace,
-            scan_directory,
+            get_workspace_shell_v2,
+            query_assets_v2,
+            query_folders_v2,
+            get_asset_details_v2,
+            mutate_assets_v2,
             start_scan_directory,
+            start_integrity_job_v2,
+            cancel_job_v2,
+            get_job_status_v2,
+            get_diagnostics_v2,
+            read_asset_range_v2,
             watch_folder,
             unwatch_folder,
-            search_assets,
-            set_asset_rating,
-            set_asset_favorite,
             delete_assets,
             sync_asset_tags,
             sync_asset_collections,
@@ -166,8 +128,6 @@ fn main() {
             delete_collection,
             save_smart_folder,
             delete_smart_folder,
-            aggregate_data,
-            filter_by_smart_folder,
             get_file_metadata,
             get_thumbnail,
             open_in_file_manager,
@@ -175,12 +135,24 @@ fn main() {
             get_storage_stats,
             migrate_data_storage,
             restart_application,
-            validate_assets,
             read_thumbnail_base64,
-            read_file_base64,
             file_exists,
-            reconcile_monitored_folders
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 桌面客户端失败");
+}
+
+fn show_initialization_error(error: &str) {
+    let message = format!("初始化 Asset Explorer V2 数据库失败：\n{error}");
+    eprintln!("{message}");
+    #[cfg(windows)]
+    {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND};
+        let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        // The native modal dialog works before Tauri exists and in release builds without a console.
+        unsafe {
+            MessageBoxW(None, PCWSTR(message.as_ptr()), w!("Asset Explorer V2"), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        }
+    }
 }

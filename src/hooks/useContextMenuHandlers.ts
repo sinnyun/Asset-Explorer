@@ -246,17 +246,14 @@ export function useContextMenuHandlers(deps: ContextMenuDeps) {
       onCreateTag,
       onCreateCollection,
       onRefresh: () => {
-        dataService.loadWorkspace().then(d => {
-          if (d) {
-            setState(prev => ({
-              ...prev,
-              folders: d.folders || [],
-              assets: d.assets || [],
-              tags: d.tags || [],
-              collections: d.collections || [],
-              customSmartFolders: d.customSmartFolders || []
-            }));
-          }
+        dataService.getWorkspaceShell().then(shell => {
+          setState(prev => ({
+            ...prev,
+            folders: shell.roots.map(folder => ({ ...folder, tags: [], collections: [] })),
+            tags: shell.tags,
+            collections: shell.collections,
+            customSmartFolders: shell.smartFolders,
+          }));
         });
       }
     });

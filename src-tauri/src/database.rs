@@ -5,20 +5,23 @@
 //! 依赖开源库：`rusqlite`, `parking_lot`, `dirs`, `fs_extra`
 //! ============================================================================
 
-use crate::models::{Asset, Collection, Folder, SmartFolder, SmartFolderRule, Tag};
-use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use crate::models::{
+    Asset, AssetMutation, Collection, FileFact, Folder, MutationSummary,
+    SmartFolder, SmartFolderRule, Tag,
+};
+#[cfg(test)]
+use crate::models::AssetUserPatch;
+#[cfg(test)]
+use crate::models::AssetDetail;
+use parking_lot::{Condvar, Mutex};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AppConfig {
-    pub data_dir: String,
-    pub monitored_folders: Vec<String>,
-}
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StorageStats {
@@ -29,173 +32,304 @@ pub struct StorageStats {
     pub asset_count: usize,
 }
 
-/// 获取全局默认配置存储路径 (%LOCALAPPDATA%\AssetHub\app_config.json)
-pub fn get_config_file_path() -> PathBuf {
-    let mut base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("./.data"));
-    base.push("AssetHub");
-    let _ = fs::create_dir_all(&base);
-    base.join("app_config.json")
+/// V2 always uses the local application-data directory; storage selection is deferred.
+pub fn get_active_data_dir() -> Result<PathBuf, String> {
+    dirs::data_local_dir()
+        .map(|base| base.join("AssetHub"))
+        .ok_or_else(|| "无法定位 Windows 本地应用数据目录".to_string())
 }
 
-/// 读取或初始化当前激活的数据根目录
-pub fn get_active_data_dir() -> PathBuf {
-    let cfg_path = get_config_file_path();
-    if cfg_path.exists() {
-        if let Ok(content) = fs::read_to_string(&cfg_path) {
-            if let Ok(cfg) = serde_json::from_str::<AppConfig>(&content) {
-                let p = PathBuf::from(cfg.data_dir);
-                if p.exists() || fs::create_dir_all(&p).is_ok() {
-                    return p;
-                }
-            }
-        }
+/// Canonical Windows identity key. Preserve drive roots and the rooted separator.
+pub fn normalize_windows_path(path: &str) -> String {
+    let normalized = path.trim().replace('/', "\\").to_lowercase();
+    let trimmed = normalized.trim_end_matches('\\');
+    if trimmed.len() == 2 && trimmed.as_bytes()[1] == b':' && normalized.len() > 2 {
+        format!("{trimmed}\\")
+    } else if trimmed.is_empty() && !normalized.is_empty() {
+        "\\".to_string()
+    } else {
+        trimmed.to_string()
     }
+}
 
-    let mut default_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("./.data"));
-    default_dir.push("AssetHub");
-    let _ = fs::create_dir_all(&default_dir);
-    default_dir
+fn timestamp_ns(value: &str) -> Result<i64, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|e| format!("无效文件时间: {e}"))?
+        .timestamp_nanos_opt()
+        .ok_or_else(|| "文件时间超出纳秒范围".to_string())
+}
+
+fn scan_file_fact(asset: &Asset) -> Result<FileFact, String> {
+    let extension = Path::new(&asset.path).extension()
+        .map(|value| value.to_string_lossy().to_lowercase()).unwrap_or_default();
+    Ok(FileFact {
+        id: asset.id.clone(),
+        folder_id: (!asset.folder_id.is_empty()).then(|| asset.folder_id.clone()),
+        path: asset.path.clone(),
+        normalized_path: normalize_windows_path(&asset.path),
+        name: asset.name.clone(),
+        mime: mime_guess::from_ext(&extension).first_raw().map(str::to_string),
+        extension,
+        asset_type: asset.asset_type.clone(),
+        size: asset.size,
+        mtime_ns: timestamp_ns(&asset.date_modified)?,
+        volume_id: None,
+        file_id: None,
+        width: asset.width,
+        height: asset.height,
+        metadata_status: "pending".to_string(),
+        generation: 0,
+    })
+}
+
+fn revision_after_mutation(tx: &rusqlite::Transaction<'_>, affected: usize) -> Result<i64, String> {
+    if affected > 0 {
+        tx.execute("UPDATE app_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision'", [])
+            .map_err(|e| format!("更新数据版本失败: {e}"))?;
+    }
+    tx.query_row("SELECT CAST(value AS INTEGER) FROM app_meta WHERE key = 'revision'", [], |row| row.get(0))
+        .map_err(|e| format!("读取数据版本失败: {e}"))
 }
 
 /// 数据库全局状态句柄
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+    read_pool: Arc<ReadPool>,
+    writer: Arc<WriteActor>,
     data_dir: PathBuf,
 }
 
+const READ_POOL_CAPACITY: usize = 4;
+const WRITE_QUEUE_CAPACITY: usize = 256;
+
+struct ReadPoolState {
+    idle: Vec<Connection>,
+    open: usize,
+}
+
+struct ReadPool {
+    db_path: PathBuf,
+    capacity: usize,
+    state: Mutex<ReadPoolState>,
+    available: Condvar,
+}
+
+impl ReadPool {
+    fn new(db_path: PathBuf, capacity: usize) -> Self {
+        Self {
+            db_path,
+            capacity,
+            state: Mutex::new(ReadPoolState { idle: Vec::new(), open: 0 }),
+            available: Condvar::new(),
+        }
+    }
+
+    fn open_connection(&self) -> Result<Connection, String> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(&self.db_path, flags)
+            .map_err(|e| format!("打开 V2 只读连接失败: {e}"))?;
+        conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;")
+            .map_err(|e| format!("配置 V2 只读连接失败: {e}"))?;
+        Ok(conn)
+    }
+
+    fn with_connection<T>(&self, read: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        let connection = loop {
+            let mut state = self.state.lock();
+            if let Some(connection) = state.idle.pop() {
+                break connection;
+            }
+            if state.open < self.capacity {
+                state.open += 1;
+                drop(state);
+                match self.open_connection() {
+                    Ok(connection) => break connection,
+                    Err(error) => {
+                        let mut state = self.state.lock();
+                        state.open = state.open.saturating_sub(1);
+                        self.available.notify_one();
+                        return Err(error);
+                    }
+                }
+            }
+            self.available.wait(&mut state);
+        };
+
+        let result = read(&connection);
+        let mut state = self.state.lock();
+        state.idle.push(connection);
+        self.available.notify_one();
+        result
+    }
+}
+
+type WriteJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
+
+struct WriteActor {
+    sender: mpsc::SyncSender<WriteJob>,
+    outstanding: Arc<AtomicUsize>,
+}
+
+impl WriteActor {
+    fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, String> {
+        let (sender, receiver) = mpsc::sync_channel::<WriteJob>(WRITE_QUEUE_CAPACITY);
+        let outstanding = Arc::new(AtomicUsize::new(0));
+        std::thread::Builder::new()
+            .name("asset-db-writer".to_string())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let mut connection = connection.lock();
+                    job(&mut connection);
+                }
+            })
+            .map_err(|e| format!("启动 V2 数据库写入线程失败: {e}"))?;
+        Ok(Self { sender, outstanding })
+    }
+
+    fn call<T, F>(&self, write: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+    {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
+        let outstanding = self.outstanding.clone();
+        if self.sender.send(Box::new(move |connection| {
+            let result = write(connection);
+            outstanding.fetch_sub(1, Ordering::AcqRel);
+            let _ = result_sender.send(result);
+        })).is_err() {
+            self.outstanding.fetch_sub(1, Ordering::AcqRel);
+            return Err("V2 数据库写入线程已停止".to_string());
+        }
+        result_receiver
+            .recv()
+            .map_err(|_| "V2 数据库写入任务未返回结果".to_string())?
+    }
+
+    fn outstanding(&self) -> usize {
+        self.outstanding.load(Ordering::Acquire)
+    }
+}
+
 /// 批量关联映射：asset_id → Vec<name_or_id>
+#[cfg(test)]
 type AssocMap = HashMap<String, Vec<String>>;
 
 /// 单条 SQL 语句中允许的最大绑定参数数量。
 /// SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER=999，为稳妥起见取 500，
 /// 避免大量资产时单个 `IN (...)` 查询超出该上限而报
 /// "too many SQL variables" 错误。
+#[cfg(test)]
 const SQLITE_VAR_LIMIT: usize = 500;
 
-/// 规范化根路径：去掉首尾空白与末尾分隔符，避免前缀误匹配。
-fn normalize_root(p: &str) -> String {
-    p.trim().trim_end_matches(['/', '\\']).to_string()
-}
+/// V2 uses a separate database; no legacy database is opened or relocated.
+pub const V2_DATABASE_FILE: &str = "assethub-v2.db";
 
-/// 判断文件路径是否位于某根目录（含根本身）之下。兼容 Windows/Linux 分隔符与大小写。
-fn is_path_under(path: &str, root: &str) -> bool {
-    let p = path.to_lowercase();
-    let r = root.to_lowercase();
-    if p == r {
-        return true;
-    }
-    p.starts_with(&format!("{}/", r)) || p.starts_with(&format!("{}\\", r))
+const ASSET_COLUMNS: &str = "a.id, a.name, a.path, a.asset_type, a.size, COALESCE(a.folder_id, ''),
+    a.mtime_ns, a.first_seen_at, COALESCE(u.rating, 0), COALESCE(u.favorite, 0),
+    u.color, a.width, a.height";
+
+/// Project V2 facts and user state into the existing scan/watcher response shape.
+fn asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
+    let first_seen: i64 = row.get(7)?;
+    let added = chrono::DateTime::from_timestamp_millis(first_seen)
+        .ok_or(rusqlite::Error::IntegralValueOutOfRange(7, first_seen))?;
+    Ok(Asset {
+        id: row.get(0)?, name: row.get(1)?, path: row.get(2)?,
+        asset_type: row.get(3)?, size: row.get::<_, i64>(4)? as u64,
+        folder_id: row.get(5)?,
+        date_modified: chrono::DateTime::from_timestamp_nanos(row.get(6)?).to_rfc3339(),
+        date_added: added.to_rfc3339(),
+        rating: row.get(8)?, favorite: row.get(9)?, color: row.get(10)?,
+        width: row.get(11)?, height: row.get(12)?,
+        file_hash: None, thumbnail_url: None, tags: Vec::new(), collections: Vec::new(),
+    })
 }
 
 impl Database {
-    /// 初始化并连接本地 SQLite 数据库文件
-    /// 自动从 app_config.json 读取自定义或默认存储路径
-    /// 若数据库文件已损坏，自动备份损坏文件并重建全新数据库
-    pub fn init() -> Result<Self, String> {
-        let db_dir = get_active_data_dir();
-        let _ = fs::create_dir_all(&db_dir);
+    /// 创建或打开全新的 V2 数据库。
+    pub fn init_v2() -> Result<Self, String> {
+        let db_dir = get_active_data_dir()?;
+        fs::create_dir_all(&db_dir).map_err(|e| format!("创建 V2 数据目录失败: {e}"))?;
+        Self::init_v2_at(&db_dir.join(V2_DATABASE_FILE))
+    }
 
-        let db_path = db_dir.join("assethub.db");
-        println!("[Database] 打开本地 SQLite 数据库: {:?}", db_path);
-
-        // 若主库文件存在但已损坏，自动备份并重建
-        if db_path.exists() {
-            // 尝试快速完整性检测：仅验证 DB 文件头与表结构页可读
-            match Connection::open(&db_path) {
-                Ok(test_conn) => {
-                    // 尝试简单查询验证数据库可用性（schema 可读即视为基本健康）
-                    let check = test_conn.query_row(
-                        "SELECT 1 FROM sqlite_master LIMIT 1",
-                        [],
-                        |r| r.get::<_, i32>(0),
-                    );
-                    match check {
-                        Ok(_) => {
-                            // 数据库 schema 可读；再执行 quick_check 检测数据页完整性
-                            let quick_check_ok = test_conn
-                                .query_row("PRAGMA quick_check", [], |row| {
-                                    row.get::<_, String>(0)
-                                })
-                                .map(|result| result.trim().starts_with("ok"))
-                                .unwrap_or(false);
-                            if !quick_check_ok {
-                                // DB 文件损坏：备份原文件后重建
-                                eprintln!("[Database] 检测到数据库文件损坏 (PRAGMA quick_check), 正在备份并重建...");
-                                let backup_name = format!("assethub_corrupt_{}.db",
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0));
-                                let backup_path = db_dir.join(backup_name);
-                                if let Err(e) = fs::rename(&db_path, &backup_path) {
-                                    // rename 失败（如文件被占用），则跳过重建，尝试继续使用
-                                    eprintln!("[Database] 备份损坏数据库失败: {}, 将继续使用原文件", e);
-                                } else {
-                                    println!("[Database] 已备份损坏数据库至: {:?}", backup_path);
-                                    // 清理可能损坏的 WAL/SHM 文件
-                                    let _ = fs::remove_file(db_dir.join("assethub.db-wal"));
-                                    let _ = fs::remove_file(db_dir.join("assethub.db-shm"));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // schema 不可读，数据库可能完全损坏
-                            eprintln!("[Database] 数据库 schema 读取失败: {}, 备份并重建...", e);
-                            let backup_name = format!("assethub_corrupt_{}.db",
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0));
-                            let backup_path = db_dir.join(backup_name);
-                            let _ = fs::rename(&db_path, &backup_path);
-                            let _ = fs::remove_file(db_dir.join("assethub.db-wal"));
-                            let _ = fs::remove_file(db_dir.join("assethub.db-shm"));
-                        }
-                    }
-                }
-                Err(_) => {
-                    // 文件无法打开（可能 0 字节或非 SQLite 格式）
-                    let backup_path = db_dir.join("assethub_corrupt.db");
-                    let _ = fs::rename(&db_path, &backup_path);
-                    eprintln!("[Database] 数据库文件无法打开，已备份并重建: {:?}", backup_path);
-                }
-            }
+    /// 在隔离位置创建 V2 数据库，供测试使用。
+    pub fn init_v2_at(db_path: &Path) -> Result<Self, String> {
+        if db_path.file_name() != Some(std::ffi::OsStr::new(V2_DATABASE_FILE)) {
+            return Err(format!("V2 数据库必须命名为 {V2_DATABASE_FILE}"));
         }
+        let data_dir = db_path
+            .parent()
+            .ok_or_else(|| "V2 数据库路径缺少父目录".to_string())?
+            .to_path_buf();
+        fs::create_dir_all(&data_dir).map_err(|e| format!("创建 V2 数据目录失败: {e}"))?;
 
-        // 打开（可能刚重建的）数据库
-        let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {}", e))?;
-
-        // 开启 WAL 高并发写入模式和外键约束
+        let conn = Connection::open(db_path).map_err(|e| format!("打开 V2 数据库失败: {e}"))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;",
+             PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;",
         )
-        .map_err(|e| format!("配置数据库 PRAGMA 失败: {}", e))?;
+        .map_err(|e| format!("配置 V2 数据库失败: {e}"))?;
 
+        let conn = Arc::new(Mutex::new(conn));
         let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-            data_dir: db_dir,
+            read_pool: Arc::new(ReadPool::new(db_path.to_path_buf(), READ_POOL_CAPACITY)),
+            writer: Arc::new(WriteActor::new(Arc::clone(&conn))?),
+            conn,
+            data_dir,
         };
-
         db.migrate_schema()?;
         Ok(db)
     }
 
-    /// 内存数据库初始化 (用于测试或快速启动备用)
-    /// data_dir 参数用于指定关联的数据目录（缩略图缓存等），
-    /// 默认使用全局激活的数据目录，避免缩略图路径解析错误。
-    pub fn init_in_memory(data_dir: Option<PathBuf>) -> Result<Self, String> {
-        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        let dir = data_dir.unwrap_or_else(get_active_data_dir);
-        let _ = fs::create_dir_all(&dir);
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-            data_dir: dir,
-        };
-        db.migrate_schema()?;
-        Ok(db)
+    pub fn asset_count(&self) -> Result<usize, String> {
+        self.read(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL", [], |row| row.get::<_, i64>(0))
+                .map(|count| count as usize)
+                .map_err(|e| format!("读取资产数量失败: {e}"))
+        })
+    }
+
+    pub fn current_revision(&self) -> Result<i64, String> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM app_meta WHERE key = 'revision'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("读取工作区版本失败: {e}"))
+        })
+    }
+
+    pub(crate) fn read<T>(&self, read: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        self.read_pool.with_connection(read)
+    }
+
+    pub(crate) fn write<T, F>(&self, write: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+    {
+        self.writer.call(write)
+    }
+
+    #[cfg(test)]
+    pub fn write_queue_capacity(&self) -> usize {
+        WRITE_QUEUE_CAPACITY
+    }
+
+    pub fn write_queue_depth(&self) -> usize {
+        self.writer.outstanding()
+    }
+
+    #[cfg(test)]
+    pub fn read_pool_capacity(&self) -> usize {
+        READ_POOL_CAPACITY
     }
 
     /// 强制执行 WAL 检查点，安全刷盘
@@ -211,9 +345,9 @@ impl Database {
 
     /// 获取存储占用统计信息
     pub fn get_storage_stats(&self) -> StorageStats {
-        let db_file = self.data_dir.join("assethub.db");
-        let db_wal = self.data_dir.join("assethub.db-wal");
-        let db_shm = self.data_dir.join("assethub.db-shm");
+        let db_file = self.data_dir.join(V2_DATABASE_FILE);
+        let db_wal = self.data_dir.join(format!("{V2_DATABASE_FILE}-wal"));
+        let db_shm = self.data_dir.join(format!("{V2_DATABASE_FILE}-shm"));
         let thumb_dir = self.data_dir.join("thumbnails");
 
         let mut db_size = fs::metadata(&db_file).map(|m| m.len()).unwrap_or(0);
@@ -231,11 +365,7 @@ impl Database {
             }
         }
 
-        let asset_count = {
-            let conn = self.conn.lock();
-            conn.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get::<_, i64>(0))
-                .unwrap_or(0) as usize
-        };
+        let asset_count = self.asset_count().unwrap_or(0);
 
         StorageStats {
             data_dir: self.data_dir.to_string_lossy().to_string(),
@@ -246,107 +376,110 @@ impl Database {
         }
     }
 
-    /// 核心功能：完整本地数据迁移
-    /// 将数据库、WAL 事务日志、全部缩略图缓存迁移至新目录，更新配置，并支持重启
-    /// 使用 fs_extra 开源库替代手写目录复制逻辑
-    pub fn migrate_storage(&self, new_dir: &Path) -> Result<(), String> {
-        if !new_dir.exists() {
-            fs::create_dir_all(new_dir).map_err(|e| format!("创建目标新目录失败: {}", e))?;
-        }
-
-        // 1. 刷写 SQLite WAL 日志
-        self.checkpoint();
-
-        // 2. 复制数据库核心文件
-        let files_to_copy = ["assethub.db", "assethub.db-wal", "assethub.db-shm"];
-        for f_name in &files_to_copy {
-            let src = self.data_dir.join(f_name);
-            if src.exists() {
-                let dest = new_dir.join(f_name);
-                fs::copy(&src, &dest).map_err(|e| format!("复制文件 {} 失败: {}", f_name, e))?;
-            }
-        }
-
-        // 3. 递归复制全部缩略图缓存目录（使用 fs_extra 开源库替代手写 read_dir 遍历）
-        let src_thumb = self.data_dir.join("thumbnails");
-        let dest_thumb = new_dir.join("thumbnails");
-        if src_thumb.exists() {
-            fs::create_dir_all(&dest_thumb).map_err(|e| format!("创建缩略图目标目录失败: {}", e))?;
-            // copy_inside=false(默认): 将源目录内容复制到目标目录中
-            let mut copy_opts = fs_extra::dir::CopyOptions::new();
-            copy_opts.overwrite = true;
-            if let Err(e) = fs_extra::dir::copy(&src_thumb, &dest_thumb, &copy_opts) {
-                eprintln!("[Database] 递归复制缩略图目录失败: {}", e);
-            }
-        }
-
-        // 4. 更新持久化配置文件 app_config.json
-        let cfg = AppConfig {
-            data_dir: new_dir.to_string_lossy().to_string(),
-            monitored_folders: Vec::new(),
-        };
-        let cfg_json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-        let cfg_path = get_config_file_path();
-        fs::write(&cfg_path, cfg_json).map_err(|e| format!("写入新路径配置失败: {}", e))?;
-
-        println!("[Database] 数据完整迁移成功！已指向新目录: {:?}", new_dir);
-        Ok(())
+    /// V2 storage selection is not available at this task boundary.
+    pub fn migrate_storage(&self, _new_dir: &Path) -> Result<(), String> {
+        Err("V2 暂不支持迁移存储位置".to_string())
     }
 
-    /// 创建或迁移核心数据表
+    /// 创建全新的 V2 schema。V2 数据库不兼容也不迁移旧表。
     fn migrate_schema(&self) -> Result<(), String> {
         let conn = self.conn.lock();
         conn.execute_batch(
             "
-            -- 1. 文件夹表
-            CREATE TABLE IF NOT EXISTS folders (
+            BEGIN IMMEDIATE;
+
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR REPLACE INTO app_meta(key, value) VALUES ('schema_epoch', '2');
+            INSERT OR IGNORE INTO app_meta(key, value) VALUES ('revision', '0');
+
+            CREATE TABLE IF NOT EXISTS roots (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 path TEXT NOT NULL,
+                normalized_path TEXT NOT NULL UNIQUE,
+                online INTEGER NOT NULL DEFAULT 1,
+                dirty INTEGER NOT NULL DEFAULT 0,
+                active_generation INTEGER NOT NULL DEFAULT 0,
+                completed_generation INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS folders (
+                id TEXT PRIMARY KEY,
+                root_id TEXT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                normalized_path TEXT NOT NULL UNIQUE,
                 parent_id TEXT,
                 is_monitored INTEGER NOT NULL DEFAULT 0,
+                mtime_ns INTEGER NOT NULL DEFAULT 0,
+                last_seen_generation INTEGER NOT NULL DEFAULT 0,
+                record_version INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE,
                 FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE
             );
 
-            -- 2. 标签表（含 description 和 is_pinned 字段，用于持久化前端额外属性）
+            CREATE TABLE IF NOT EXISTS assets (
+                id TEXT PRIMARY KEY,
+                root_id TEXT,
+                folder_id TEXT,
+                path TEXT NOT NULL,
+                normalized_path TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                extension TEXT NOT NULL DEFAULT '',
+                asset_type TEXT NOT NULL,
+                mime TEXT,
+                size INTEGER NOT NULL CHECK(size >= 0),
+                mtime_ns INTEGER NOT NULL,
+                volume_id TEXT,
+                file_id TEXT,
+                width INTEGER,
+                height INTEGER,
+                duration_ms INTEGER,
+                metadata_status TEXT NOT NULL DEFAULT 'pending',
+                thumbnail_status TEXT NOT NULL DEFAULT 'missing',
+                thumbnail_version TEXT,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_generation INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER,
+                record_version INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE,
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_user_state (
+                asset_id TEXT PRIMARY KEY,
+                rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+                favorite INTEGER NOT NULL DEFAULT 0,
+                color TEXT,
+                custom_name TEXT,
+                notes TEXT,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS tags (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 color TEXT NOT NULL,
-                description TEXT DEFAULT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0
+                description TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0
             );
 
-            -- 3. 集合表（含 color、description 和 is_pinned 字段，用于持久化前端额外属性）
             CREATE TABLE IF NOT EXISTS collections (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
-                color TEXT DEFAULT NULL,
-                description TEXT DEFAULT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0
-            );
-
-            -- 4. 资产主表
-            CREATE TABLE IF NOT EXISTS assets (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                asset_type TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                folder_id TEXT NOT NULL,
-                date_modified TEXT NOT NULL,
-                date_added TEXT NOT NULL,
-                rating INTEGER NOT NULL DEFAULT 0,
-                favorite INTEGER NOT NULL DEFAULT 0,
                 color TEXT,
-                width INTEGER,
-                height INTEGER,
-                file_hash TEXT,
-                thumbnail_url TEXT,
-                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE
+                description TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0
             );
 
-            -- 5. 智能文件夹表
             CREATE TABLE IF NOT EXISTS smart_folders (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -356,7 +489,6 @@ impl Database {
                 is_search_history INTEGER NOT NULL DEFAULT 0
             );
 
-            -- 6. 资产-标签关联多对多表
             CREATE TABLE IF NOT EXISTS asset_tags (
                 asset_id TEXT NOT NULL,
                 tag_id TEXT NOT NULL,
@@ -365,7 +497,6 @@ impl Database {
                 FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
             );
 
-            -- 7. 资产-集合关联多对多表
             CREATE TABLE IF NOT EXISTS asset_collections (
                 asset_id TEXT NOT NULL,
                 collection_id TEXT NOT NULL,
@@ -374,65 +505,59 @@ impl Database {
                 FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
             );
 
-            -- 建立高性能查询索引
-            CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder_id);
-            CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(asset_type);
-            CREATE INDEX IF NOT EXISTS idx_assets_rating ON assets(rating);
-            CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(name);
+            CREATE TABLE IF NOT EXISTS scan_jobs (
+                id TEXT PRIMARY KEY,
+                root_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                discovered_count INTEGER NOT NULL DEFAULT 0,
+                indexed_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                error TEXT,
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS file_event_journal (
+                root_id TEXT NOT NULL,
+                normalized_path TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                observed_at INTEGER NOT NULL,
+                PRIMARY KEY (root_id, normalized_path),
+                FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_errors (
+                asset_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                message TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (asset_id, stage),
+                FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS mutation_operations (
+                operation_id TEXT PRIMARY KEY,
+                affected INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_folders_parent_name ON folders(parent_id, name, id);
+            CREATE INDEX IF NOT EXISTS idx_folders_root_path ON folders(root_id, normalized_path);
+            CREATE INDEX IF NOT EXISTS idx_assets_folder_name ON assets(folder_id, name COLLATE NOCASE, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_folder_mtime ON assets(folder_id, mtime_ns DESC, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_folder_size ON assets(folder_id, size DESC, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_root_path ON assets(root_id, normalized_path);
+            CREATE INDEX IF NOT EXISTS idx_assets_type_mtime ON assets(asset_type, mtime_ns DESC, id);
+            CREATE INDEX IF NOT EXISTS idx_assets_file_identity ON assets(volume_id, file_id);
+            CREATE INDEX IF NOT EXISTS idx_user_favorite_rating ON asset_user_state(favorite, rating, asset_id);
             CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag_id);
             CREATE INDEX IF NOT EXISTS idx_asset_cols_col ON asset_collections(collection_id);
-            ",
-        )
-        .map_err(|e| format!("数据库表结构初始化失败: {}", e))?;
 
-        // 兼容旧版数据库：通过 PRAGMA table_info 检查列是否存在，避免 ALTER 报错后仍忽略
-        // 替代之前"重复执行报错就忽略"的 hack 方式
-        let existing_columns = |table: &str| -> Vec<String> {
-            let mut stmt = match conn.prepare(&format!("PRAGMA table_info({})", table)) {
-                Ok(s) => s,
-                Err(_) => return Vec::new(),
-            };
-            let cols = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .and_then(|iter| iter.collect())
-                .unwrap_or_default();
-            cols
-        };
-
-        // tags 表迁移
-        let tag_cols = existing_columns("tags");
-        if !tag_cols.is_empty() && !tag_cols.iter().any(|c| c == "description") {
-            let _ = conn.execute_batch("ALTER TABLE tags ADD COLUMN description TEXT DEFAULT NULL;");
-        }
-        if !tag_cols.is_empty() && !tag_cols.iter().any(|c| c == "is_pinned") {
-            let _ = conn.execute_batch("ALTER TABLE tags ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
-        }
-
-        // collections 表迁移
-        let col_cols = existing_columns("collections");
-        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "color") {
-            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN color TEXT DEFAULT NULL;");
-        }
-        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "description") {
-            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN description TEXT DEFAULT NULL;");
-        }
-        if !col_cols.is_empty() && !col_cols.iter().any(|c| c == "is_pinned") {
-            let _ = conn.execute_batch("ALTER TABLE collections ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;");
-        }
-
-        // 5. folders 表迁移
-        //    新增 mtime 列：记录目录磁盘修改时间，供对账增量剪枝使用。
-        //    （内容级文件修改不会改变父目录 mtime，详阅 PLAN_realtime_reconcile.md）
-        let folder_cols = existing_columns("folders");
-        if !folder_cols.is_empty() && !folder_cols.iter().any(|c| c == "mtime") {
-            let _ = conn.execute_batch("ALTER TABLE folders ADD COLUMN mtime TEXT DEFAULT NULL;");
-        }
-
-        // 5. 创建 FTS5 全文搜索虚拟表（SQLite >= 3.41 bundled 自带 FTS5）
-        // 使用外部内容表关联 assets 表，FTS 索引通过触发器自动同步
-        conn.execute_batch(
-            "
-            -- FTS5 全文搜索虚拟表（外部内容关联 assets 表）
             CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
                 name,
                 path,
@@ -441,34 +566,7 @@ impl Database {
                 content_rowid='rowid',
                 tokenize='unicode61'
             );
-            ",
-        )
-        .map_err(|e| format!("FTS5 全文搜索索引初始化失败: {}", e))?;
 
-        // 仅当 assets 表已有数据但 FTS 索引为空时重建（首次升级场景）
-        // 已有 FTS 索引的场景无需重建，触发器将自动维护同步
-        let asset_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
-            .map_err(|e| format!("统计资产数量失败: {}", e))?;
-
-        let fts_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM assets_fts", [], |r| r.get(0))
-            .unwrap_or(0);
-
-        if asset_count > 0 && fts_count == 0 {
-            // 旧库升级首次迁移：将已有资产全量写入 FTS 索引
-            conn.execute_batch(
-                "
-                INSERT INTO assets_fts(assets_fts) VALUES('rebuild');
-                ",
-            )
-            .map_err(|e| format!("FTS5 索引重建失败: {}", e))?;
-            println!("[Database] FTS5 索引重建完成 ({} 条资产)", asset_count);
-        }
-        // 6. 为 assets 表创建 AFTER 触发器，实现 FTS 索引自动同步
-        //    - 当 assets 插入/更新/删除时自动维护 FTS 索引
-        conn.execute_batch(
-            "
             CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
                 INSERT INTO assets_fts(rowid, name, path, asset_type)
                 VALUES (new.rowid, new.name, new.path, new.asset_type);
@@ -479,154 +577,450 @@ impl Database {
                 VALUES ('delete', old.rowid, old.name, old.path, old.asset_type);
             END;
 
-            CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE ON assets BEGIN
+            DROP TRIGGER IF EXISTS assets_au;
+            CREATE TRIGGER assets_au
+            AFTER UPDATE OF name, path, asset_type ON assets
+            WHEN old.name IS NOT new.name OR old.path IS NOT new.path OR old.asset_type IS NOT new.asset_type
+            BEGIN
                 INSERT INTO assets_fts(assets_fts, rowid, name, path, asset_type)
                 VALUES ('delete', old.rowid, old.name, old.path, old.asset_type);
                 INSERT INTO assets_fts(rowid, name, path, asset_type)
                 VALUES (new.rowid, new.name, new.path, new.asset_type);
             END;
+
+            COMMIT;
             ",
         )
-        .map_err(|e| format!("FTS5 触发器初始化失败: {}", e))?;
+        .map_err(|e| format!("V2 数据库表结构初始化失败: {e}"))?;
 
         Ok(())
+    }
+
+    /// 批量写入文件系统事实，不接触用户状态。
+    pub fn upsert_file_facts(&self, facts: &[FileFact]) -> Result<usize, String> {
+        let facts = facts.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|e| format!("开始文件事实事务失败: {e}"))?;
+            Self::write_file_facts(&tx, &facts)?;
+            revision_after_mutation(&tx, facts.len())?;
+            tx.commit().map_err(|e| format!("提交文件事实失败: {e}"))?;
+            Ok(facts.len())
+        })
+    }
+
+    pub fn begin_root_scan(&self, root: &Folder) -> Result<i64, String> {
+        let root = root.clone();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let generation: i64 = tx.query_row(
+                "INSERT INTO roots(id, name, path, normalized_path, online, dirty, active_generation, completed_generation, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, 0, 1, 0, ?5, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name, path=excluded.path, normalized_path=excluded.normalized_path,
+                    online=1, active_generation=roots.active_generation + 1, updated_at=excluded.updated_at
+                 RETURNING active_generation",
+                params![root.id, root.name, root.path, normalize_windows_path(&root.path), now],
+                |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            Self::write_folder(&tx, &root)?;
+            tx.execute(
+                "UPDATE folders SET root_id=?1, last_seen_generation=?2 WHERE id=?1",
+                params![root.id, generation],
+            ).map_err(|error| error.to_string())?;
+            revision_after_mutation(&tx, 1)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(generation)
+        })
+    }
+
+    pub fn upsert_scan_file_facts(
+        &self,
+        root_id: &str,
+        generation: i64,
+        facts: &[FileFact],
+    ) -> Result<usize, String> {
+        let root_id = root_id.to_string();
+        let mut facts = facts.to_vec();
+        for fact in &mut facts {
+            fact.generation = generation;
+        }
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            Self::write_file_facts(&tx, &facts)?;
+            let changed = facts.len();
+            for fact in &facts {
+                tx.execute(
+                    "UPDATE assets SET root_id=?1, last_seen_generation=?2 WHERE id=?3",
+                    params![root_id, generation, fact.id],
+                ).map_err(|error| error.to_string())?;
+            }
+            revision_after_mutation(&tx, changed)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(changed)
+        })
+    }
+
+    pub fn upsert_scan_assets(
+        &self,
+        root_id: &str,
+        generation: i64,
+        assets: &[Asset],
+    ) -> Result<usize, String> {
+        let facts = assets.iter().map(scan_file_fact).collect::<Result<Vec<_>, _>>()?;
+        self.upsert_scan_file_facts(root_id, generation, &facts)
+    }
+
+    pub fn upsert_scan_folders(
+        &self,
+        root_id: &str,
+        generation: i64,
+        folders: &[Folder],
+    ) -> Result<usize, String> {
+        let root_id = root_id.to_string();
+        let folders = folders.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            for folder in &folders {
+                Self::write_folder(&tx, folder)?;
+                tx.execute(
+                    "UPDATE folders SET root_id=?1, last_seen_generation=?2 WHERE id=?3",
+                    params![root_id, generation, folder.id],
+                ).map_err(|error| error.to_string())?;
+            }
+            let changed = folders.len();
+            revision_after_mutation(&tx, changed)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(changed)
+        })
+    }
+
+    pub fn complete_root_scan(&self, root_id: &str, generation: i64) -> Result<usize, String> {
+        let root_id = root_id.to_string();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let active: Option<i64> = tx.query_row(
+                "SELECT active_generation FROM roots WHERE id=?1",
+                [&root_id],
+                |row| row.get(0),
+            ).optional().map_err(|error| error.to_string())?;
+            if active != Some(generation) {
+                return Err("scan generation is no longer active".to_string());
+            }
+            let removed = tx.execute(
+                "UPDATE assets SET deleted_at=?1, record_version=record_version+1
+                 WHERE root_id=?2 AND last_seen_generation<>?3 AND deleted_at IS NULL",
+                params![chrono::Utc::now().timestamp_millis(), root_id, generation],
+            ).map_err(|error| error.to_string())?;
+            let removed_folders = tx.execute(
+                "DELETE FROM folders WHERE root_id=?1 AND id<>?1 AND last_seen_generation<>?2",
+                params![root_id, generation],
+            ).map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE roots SET completed_generation=?2, dirty=0, updated_at=?3 WHERE id=?1",
+                params![root_id, generation, chrono::Utc::now().timestamp_millis()],
+            ).map_err(|error| error.to_string())?;
+            revision_after_mutation(&tx, removed + removed_folders)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(removed)
+        })
+    }
+
+    fn write_file_facts(tx: &rusqlite::Transaction<'_>, facts: &[FileFact]) -> Result<(), String> {
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO assets (
+                        id, folder_id, path, normalized_path, name, extension, asset_type, mime,
+                        size, mtime_ns, volume_id, file_id, width, height, metadata_status,
+                        first_seen_at, last_seen_generation, record_version
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                        ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                        ?16, ?17, 1
+                     )
+                     ON CONFLICT(id) DO UPDATE SET
+                        folder_id = excluded.folder_id,
+                        path = excluded.path,
+                        normalized_path = excluded.normalized_path,
+                        name = excluded.name,
+                        extension = excluded.extension,
+                        asset_type = excluded.asset_type,
+                        mime = excluded.mime,
+                        size = excluded.size,
+                        mtime_ns = excluded.mtime_ns,
+                        volume_id = excluded.volume_id,
+                        file_id = excluded.file_id,
+                        width = excluded.width,
+                        height = excluded.height,
+                        metadata_status = excluded.metadata_status,
+                        last_seen_generation = excluded.last_seen_generation,
+                        deleted_at = NULL,
+                        record_version = assets.record_version + 1",
+                )
+                .map_err(|e| format!("准备文件事实写入失败: {e}"))?;
+
+            for fact in facts {
+                stmt.execute(params![
+                    fact.id,
+                    fact.folder_id,
+                    fact.path,
+                    normalize_windows_path(&fact.path),
+                    fact.name,
+                    fact.extension,
+                    fact.asset_type,
+                    fact.mime,
+                    i64::try_from(fact.size).map_err(|_| "文件大小超出 SQLite 整数范围".to_string())?,
+                    fact.mtime_ns,
+                    fact.volume_id,
+                    fact.file_id,
+                    fact.width,
+                    fact.height,
+                    fact.metadata_status,
+                    now,
+                    fact.generation,
+                ])
+                .map_err(|e| format!("写入 normalized_path={} 失败: {e}", fact.normalized_path))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn patch_user_state(&self, patch: &AssetUserPatch) -> Result<MutationSummary, String> {
+        let patch = patch.clone();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|e| format!("开始用户状态事务失败: {e}"))?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let affected = tx.execute(
+                "INSERT INTO asset_user_state(asset_id, rating, favorite, color, custom_name, notes, updated_at)
+                 SELECT id, COALESCE(?2, 0), COALESCE(?3, 0), ?4, ?5, ?6, ?7
+                 FROM assets WHERE id = ?1 AND deleted_at IS NULL
+                 ON CONFLICT(asset_id) DO UPDATE SET
+                    rating = COALESCE(?2, rating),
+                    favorite = COALESCE(?3, favorite),
+                    color = COALESCE(?4, color),
+                    custom_name = COALESCE(?5, custom_name),
+                    notes = COALESCE(?6, notes),
+                    updated_at = ?7",
+                params![patch.asset_id, patch.rating, patch.favorite.map(i32::from),
+                    patch.color, patch.custom_name, patch.notes, now],
+            ).map_err(|e| format!("更新用户状态失败: {e}"))?;
+            let revision = revision_after_mutation(&tx, affected)?;
+            tx.commit().map_err(|e| format!("提交用户状态失败: {e}"))?;
+            Ok(MutationSummary { affected, revision })
+        })
+    }
+
+    pub fn mutate_assets(&self, command: &AssetMutation) -> Result<MutationSummary, String> {
+        if command.operation_id.trim().is_empty() {
+            return Err("operationId is required".to_string());
+        }
+        let mut ids = command.ids.clone();
+        ids.sort();
+        ids.dedup();
+        let has_selection = command.selection.is_some();
+        if (ids.is_empty() == !has_selection) || ids.len() > 1_000 {
+            return Err("provide either 1..=1000 explicit ids or one query selection".to_string());
+        }
+        if let Some(selection) = &command.selection {
+            let filter_values = selection.query.types.len() + selection.query.tag_ids.len()
+                + selection.query.collection_ids.len() + selection.excluded_ids.len();
+            if selection.excluded_ids.len() > 400 || filter_values > 900 {
+                return Err("query selection contains too many filter or excluded values".to_string());
+            }
+        }
+        let command = command.clone();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            if let Some(summary) = tx.query_row(
+                "SELECT affected, revision FROM mutation_operations WHERE operation_id=?1",
+                [&command.operation_id],
+                |row| Ok(MutationSummary { affected: row.get::<_, i64>(0)? as usize, revision: row.get(1)? }),
+            ).optional().map_err(|error| error.to_string())? {
+                tx.commit().map_err(|error| error.to_string())?;
+                return Ok(summary);
+            }
+
+            tx.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS mutation_targets(id TEXT PRIMARY KEY) WITHOUT ROWID;
+                 DELETE FROM mutation_targets;",
+            ).map_err(|error| error.to_string())?;
+
+            if let Some(selection) = &command.selection {
+                let mut target_sql = String::from(
+                    "INSERT OR IGNORE INTO mutation_targets(id)
+                     SELECT a.id FROM assets a
+                     LEFT JOIN asset_user_state u ON u.asset_id=a.id
+                     WHERE a.deleted_at IS NULL",
+                );
+                let mut values = Vec::<rusqlite::types::Value>::new();
+                crate::asset_query::append_asset_filters(&selection.query, &mut target_sql, &mut values);
+                if !selection.excluded_ids.is_empty() {
+                    target_sql.push_str(" AND a.id NOT IN (");
+                    target_sql.push_str(&vec!["?"; selection.excluded_ids.len()].join(","));
+                    target_sql.push(')');
+                    values.extend(selection.excluded_ids.iter().cloned().map(rusqlite::types::Value::from));
+                }
+                tx.execute(&target_sql, rusqlite::params_from_iter(values.iter()))
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let mut target_statement = tx.prepare(
+                    "INSERT OR IGNORE INTO mutation_targets(id)
+                     SELECT id FROM assets WHERE id=?1 AND deleted_at IS NULL",
+                ).map_err(|error| error.to_string())?;
+                for id in &ids {
+                    target_statement.execute([id]).map_err(|error| error.to_string())?;
+                }
+            }
+
+            let affected: usize = tx.query_row("SELECT count(*) FROM mutation_targets", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            if command.selection.is_none() && affected != ids.len() {
+                return Err("mutation conflict: one or more assets no longer exist".to_string());
+            }
+            if let Some(expected) = command.expected_version {
+                let conflicts: usize = tx.query_row(
+                    "SELECT count(*) FROM assets a JOIN mutation_targets t ON t.id=a.id WHERE a.record_version<>?1",
+                    [expected], |row| row.get(0),
+                ).map_err(|error| error.to_string())?;
+                if conflicts > 0 {
+                    return Err("mutation conflict: stale asset version".to_string());
+                }
+            }
+
+            let now = chrono::Utc::now().timestamp_millis();
+            tx.execute(
+                "INSERT INTO asset_user_state(asset_id, rating, favorite, color, updated_at)
+                 SELECT t.id, COALESCE(?1, 0), COALESCE(?2, 0), ?3, ?4 FROM mutation_targets t WHERE true
+                 ON CONFLICT(asset_id) DO UPDATE SET
+                   rating=COALESCE(?1, asset_user_state.rating),
+                   favorite=COALESCE(?2, asset_user_state.favorite),
+                   color=COALESCE(?3, asset_user_state.color), updated_at=?4",
+                params![command.patch.rating.map(|value| value.min(5)), command.patch.favorite.map(i32::from), command.patch.color, now],
+            ).map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE assets SET record_version=record_version+1 WHERE id IN (SELECT id FROM mutation_targets)",
+                [],
+            ).map_err(|error| error.to_string())?;
+
+            let revision = revision_after_mutation(&tx, affected)?;
+            tx.execute(
+                "INSERT INTO mutation_operations(operation_id, affected, revision, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![command.operation_id, affected as i64, revision, now],
+            ).map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(MutationSummary { affected, revision })
+        })
+    }
+
+    #[cfg(test)]
+    pub fn get_asset_detail(&self, id: &str) -> Result<Option<AssetDetail>, String> {
+        let conn = self.conn.lock();
+        let result = conn.query_row(
+            "SELECT a.id, a.path, a.normalized_path, a.name, a.asset_type, a.size, a.mtime_ns,
+                    COALESCE(u.rating, 0), COALESCE(u.favorite, 0), u.color,
+                    u.custom_name, u.notes, a.record_version
+             FROM assets a
+             LEFT JOIN asset_user_state u ON u.asset_id = a.id
+             WHERE a.id = ?1 AND a.deleted_at IS NULL",
+            params![id],
+            |row| {
+                Ok(AssetDetail {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    normalized_path: row.get(2)?,
+                    name: row.get(3)?,
+                    asset_type: row.get(4)?,
+                    size: row.get::<_, i64>(5)? as u64,
+                    mtime_ns: row.get(6)?,
+                    rating: row.get::<_, i64>(7)? as u8,
+                    favorite: row.get::<_, i64>(8)? != 0,
+                    color: row.get(9)?,
+                    custom_name: row.get(10)?,
+                    notes: row.get(11)?,
+                    record_version: row.get(12)?,
+                })
+            },
+        );
+        match result {
+            Ok(detail) => Ok(Some(detail)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("读取资产详情失败: {e}")),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn table_columns(&self, table: &str) -> Result<Vec<String>, String> {
+        const TABLES: &[&str] = &[
+            "roots",
+            "folders",
+            "assets",
+            "asset_user_state",
+            "tags",
+            "collections",
+            "asset_tags",
+            "asset_collections",
+            "scan_jobs",
+            "file_event_journal",
+            "asset_errors",
+        ];
+        if !TABLES.contains(&table) {
+            return Err(format!("不允许检查未知表: {table}"));
+        }
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| format!("读取表结构失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("查询表结构失败: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("解析表结构失败: {e}"))
     }
 
     // =========================================================================
     // 资产 CRUD 操作
     // =========================================================================
 
-    /// 批量保存扫描到的文件夹与资产 (原子事务加速，10,000 条记录在数十毫秒内完成)
+    /// Persist a complete scan batch atomically without writing user state or removing unseen rows.
     pub fn batch_save_scan_results(
         &self,
         root_folder: &Folder,
         sub_folders: &[Folder],
         assets: &[Asset],
     ) -> Result<(), String> {
+        let facts = assets.iter().map(scan_file_fact).collect::<Result<Vec<_>, _>>()?;
         let mut conn = self.conn.lock();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-        // 1. 插入根文件夹
-        tx.execute(
-            "INSERT OR REPLACE INTO folders (id, name, path, parent_id, is_monitored) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                root_folder.id,
-                root_folder.name,
-                root_folder.path,
-                root_folder.parent_id,
-                root_folder.is_monitored as i32
-            ],
-        ).map_err(|e| e.to_string())?;
-
-        // 2. 插入子文件夹
-        for f in sub_folders {
-            tx.execute(
-                "INSERT OR REPLACE INTO folders (id, name, path, parent_id, is_monitored) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![f.id, f.name, f.path, f.parent_id, f.is_monitored as i32],
-            ).map_err(|e| e.to_string())?;
+        Self::write_folder(&tx, root_folder)?;
+        for folder in sub_folders {
+            Self::write_folder(&tx, folder)?;
         }
-
-        // 3. 批量插入资产（使用 UPSERT 保留已有关联，避免 INSERT OR REPLACE 级联清空 asset_tags/asset_collections）
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO assets (
-                    id, name, path, asset_type, size, folder_id, date_modified, date_added,
-                    rating, favorite, color, width, height, file_hash, thumbnail_url
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    path = excluded.path,
-                    asset_type = excluded.asset_type,
-                    size = excluded.size,
-                    folder_id = excluded.folder_id,
-                    date_modified = excluded.date_modified,
-                    date_added = excluded.date_added,
-                    rating = excluded.rating,
-                    favorite = excluded.favorite,
-                    color = excluded.color,
-                    width = excluded.width,
-                    height = excluded.height,
-                    file_hash = excluded.file_hash,
-                    thumbnail_url = excluded.thumbnail_url",
-            ).map_err(|e| e.to_string())?;
-
-            for a in assets {
-                stmt.execute(params![
-                    a.id,
-                    a.name,
-                    a.path,
-                    a.asset_type,
-                    a.size as i64,
-                    a.folder_id,
-                    a.date_modified,
-                    a.date_added,
-                    a.rating as i32,
-                    a.favorite as i32,
-                    a.color,
-                    a.width,
-                    a.height,
-                    a.file_hash,
-                    a.thumbnail_url
-                ])
-                .map_err(|e| e.to_string())?;
-            }
-        }
-
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
+        Self::write_file_facts(&tx, &facts)?;
+        revision_after_mutation(&tx, 1 + sub_folders.len() + facts.len())?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
-    /// 仅批量写入资产（UPSERT 保留已有关联）。
-    /// 供增量扫描的分批阶段使用——文件夹已在「扫描开始」阶段由 batch_save_scan_results
-    /// 一次性写入，此处只负责资产本身，避免每批都重复插入整棵目录树。
+    /// Incremental scans use the same protected fact writer.
     pub fn batch_save_assets(&self, assets: &[Asset]) -> Result<(), String> {
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO assets (
-                    id, name, path, asset_type, size, folder_id, date_modified, date_added,
-                    rating, favorite, color, width, height, file_hash, thumbnail_url
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    path = excluded.path,
-                    asset_type = excluded.asset_type,
-                    size = excluded.size,
-                    folder_id = excluded.folder_id,
-                    date_modified = excluded.date_modified,
-                    date_added = excluded.date_added,
-                    rating = excluded.rating,
-                    favorite = excluded.favorite,
-                    color = excluded.color,
-                    width = excluded.width,
-                    height = excluded.height,
-                    file_hash = excluded.file_hash,
-                    thumbnail_url = excluded.thumbnail_url",
-            ).map_err(|e| e.to_string())?;
+        let facts = assets.iter().map(scan_file_fact).collect::<Result<Vec<_>, _>>()?;
+        self.upsert_file_facts(&facts).map(|_| ())
+    }
 
-            for a in assets {
-                stmt.execute(params![
-                    a.id,
-                    a.name,
-                    a.path,
-                    a.asset_type,
-                    a.size as i64,
-                    a.folder_id,
-                    a.date_modified,
-                    a.date_added,
-                    a.rating as i32,
-                    a.favorite as i32,
-                    a.color,
-                    a.width,
-                    a.height,
-                    a.file_hash,
-                    a.thumbnail_url
-                ])
-                .map_err(|e| e.to_string())?;
-            }
-        }
-        tx.commit().map_err(|e| e.to_string())?;
+    fn write_folder(tx: &rusqlite::Transaction<'_>, folder: &Folder) -> Result<(), String> {
+        let mtime_ns = folder.mtime.as_deref().map(timestamp_ns).transpose()?.unwrap_or(0);
+        tx.execute(
+            "INSERT INTO folders(id, name, path, normalized_path, parent_id, is_monitored, mtime_ns)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name, path = excluded.path, normalized_path = excluded.normalized_path,
+                parent_id = excluded.parent_id, mtime_ns = excluded.mtime_ns,
+                record_version = folders.record_version + 1",
+            params![folder.id, folder.name, folder.path, normalize_windows_path(&folder.path),
+                folder.parent_id, i32::from(folder.is_monitored), mtime_ns],
+        ).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -641,50 +1035,18 @@ impl Database {
     // =========================================================================
 
     /// 获取所有资产列表及附带标签/集合关联
+    #[cfg(test)]
     pub fn get_all_assets(&self) -> Result<Vec<Asset>, String> {
         let conn = self.conn.lock();
 
-        // 第一步：一次 JOIN 查询拉取全部资产
-        let mut stmt = conn
-            .prepare(
-                "SELECT a.id, a.name, a.path, a.asset_type, a.size, a.folder_id,
-                        a.date_modified, a.date_added, a.rating, a.favorite,
-                        a.color, a.width, a.height, a.file_hash, a.thumbnail_url
-                 FROM assets a
-                 ORDER BY a.date_modified DESC",
-            )
-            .map_err(|e| e.to_string())?;
-
-        let asset_iter = stmt
-            .query_map([], |row| {
-                Ok(Asset {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    asset_type: row.get(3)?,
-                    size: row.get::<_, i64>(4)? as u64,
-                    folder_id: row.get(5)?,
-                    date_modified: row.get(6)?,
-                    date_added: row.get(7)?,
-                    rating: row.get::<_, i32>(8)? as u8,
-                    favorite: row.get::<_, i32>(9)? != 0,
-                    color: row.get(10)?,
-                    width: row.get(11)?,
-                    height: row.get(12)?,
-                    file_hash: row.get(13)?,
-                    thumbnail_url: row.get(14)?,
-                    tags: Vec::new(),
-                    collections: Vec::new(),
-                })
-            })
-            .map_err(|e| e.to_string())?;
-
-        let mut assets = Vec::new();
-        for a in asset_iter {
-            if let Ok(asset) = a {
-                assets.push(asset);
-            }
-        }
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets a
+             LEFT JOIN asset_user_state u ON u.asset_id = a.id
+             WHERE a.deleted_at IS NULL ORDER BY a.mtime_ns DESC"
+        )).map_err(|e| e.to_string())?;
+        let mut assets = stmt.query_map([], asset_from_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
 
         if assets.is_empty() {
             return Ok(assets);
@@ -705,6 +1067,7 @@ impl Database {
     }
 
     /// 分批 JOIN 查询加载全部资产的标签（消除 N+1，并规避单条 IN 超变量上限）
+    #[cfg(test)]
     fn load_tags_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
         let mut map: AssocMap = HashMap::new();
         if asset_ids.is_empty() {
@@ -736,6 +1099,7 @@ impl Database {
     }
 
     /// 分批 JOIN 查询加载全部资产的集合（消除 N+1，并规避单条 IN 超变量上限）
+    #[cfg(test)]
     fn load_cols_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
         let mut map: AssocMap = HashMap::new();
         if asset_ids.is_empty() {
@@ -773,6 +1137,7 @@ impl Database {
     /// 全文搜索资产（基于 SQLite FTS5 索引）
     /// query: 用户输入的搜索关键字（支持 FTS5 MATCH 语法）
     /// limit: 返回最大条数
+    #[cfg(test)]
     pub fn search_assets(&self, query: &str, limit: usize) -> Result<Vec<Asset>, String> {
         let query = query.trim();
         if query.is_empty() {
@@ -785,50 +1150,18 @@ impl Database {
 
         let conn = self.conn.lock();
 
-        // 通过 FTS5 索引定位匹配的 rowid，再 JOIN assets 表获取完整数据
         let sql = format!(
-            "SELECT a.id, a.name, a.path, a.asset_type, a.size, a.folder_id,
-                    a.date_modified, a.date_added, a.rating, a.favorite,
-                    a.color, a.width, a.height, a.file_hash, a.thumbnail_url
-             FROM assets_fts f
-             JOIN assets a ON a.rowid = f.rowid
-             WHERE f MATCH ?1
-             ORDER BY a.date_modified DESC
-             LIMIT ?2"
+            "SELECT {ASSET_COLUMNS}
+             FROM assets_fts
+             JOIN assets a ON a.rowid = assets_fts.rowid
+             LEFT JOIN asset_user_state u ON u.asset_id = a.id
+             WHERE assets_fts MATCH ?1 AND a.deleted_at IS NULL
+             ORDER BY a.mtime_ns DESC LIMIT ?2"
         );
-
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("FTS5 搜索准备失败: {}", e))?;
-
-        let rows = stmt
-            .query_map(params![fts_query, limit as i64], |row| {
-                Ok(Asset {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    asset_type: row.get(3)?,
-                    size: row.get::<_, i64>(4)? as u64,
-                    folder_id: row.get(5)?,
-                    date_modified: row.get(6)?,
-                    date_added: row.get(7)?,
-                    rating: row.get::<_, i32>(8)? as u8,
-                    favorite: row.get::<_, i32>(9)? != 0,
-                    color: row.get(10)?,
-                    width: row.get(11)?,
-                    height: row.get(12)?,
-                    file_hash: row.get(13)?,
-                    thumbnail_url: row.get(14)?,
-                    tags: Vec::new(),
-                    collections: Vec::new(),
-                })
-            })
-            .map_err(|e| format!("FTS5 搜索执行失败: {}", e))?;
-
-        let mut found = Vec::new();
-        for r in rows.flatten() {
-            found.push(r);
-        }
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("FTS5 搜索准备失败: {e}"))?;
+        let mut found = stmt.query_map(params![fts_query, limit as i64], asset_from_row)
+            .map_err(|e| format!("FTS5 搜索执行失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
 
         // 若结果非空，同样批量加载关联标签与集合（消除 N+1）
         if !found.is_empty() {
@@ -844,57 +1177,22 @@ impl Database {
         Ok(found)
     }
 
-    /// 更新资产缩略图 URL（懒加载生成后保存）
-    pub fn update_asset_thumbnail_url(&self, id: &str, thumbnail_url: &str) -> Result<(), String> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE assets SET thumbnail_url = ?1 WHERE id = ?2",
-            params![thumbnail_url, id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// 单语句更新资产的磁盘签名字段（mtime/size/宽高/哈希），供 watcher 快速通道
-    /// 在文件内容被修改后联动重读元数据使用，避免逐字段 UPDATE 的多次往返。
+    /// Refresh only V2 filesystem signature fields for watcher modifications.
     pub fn update_asset_signature(
-        &self,
-        asset_id: &str,
-        date_modified: &str,
-        size: u64,
-        width: Option<u32>,
-        height: Option<u32>,
-        file_hash: Option<&str>,
+        &self, asset_id: &str, date_modified: &str, size: u64,
+        width: Option<u32>, height: Option<u32>, _file_hash: Option<&str>,
     ) -> Result<(), String> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE assets SET date_modified = ?1, size = ?2, width = ?3, height = ?4, file_hash = ?5
-             WHERE id = ?6",
-            params![date_modified, size as i64, width, height, file_hash, asset_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// 更新资产评分与收藏状态
-    pub fn set_asset_rating(&self, id: &str, rating: u8) -> Result<(), String> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE assets SET rating = ?1 WHERE id = ?2",
-            params![rating as i32, id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn set_asset_favorite(&self, id: &str, favorite: bool) -> Result<(), String> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE assets SET favorite = ?1 WHERE id = ?2",
-            params![favorite as i32, id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        let mtime_ns = timestamp_ns(date_modified)?;
+        let size = i64::try_from(size).map_err(|_| "文件大小超出 SQLite 整数范围".to_string())?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let affected = tx.execute(
+            "UPDATE assets SET mtime_ns = ?1, size = ?2, width = ?3, height = ?4,
+                record_version = record_version + 1 WHERE id = ?5",
+            params![mtime_ns, size, width, height, asset_id],
+        ).map_err(|e| e.to_string())?;
+        revision_after_mutation(&tx, affected)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     /// 批量删除资产
@@ -1020,7 +1318,7 @@ impl Database {
     pub fn get_folders(&self) -> Result<Vec<Folder>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, path, parent_id, is_monitored, mtime FROM folders ORDER BY name ASC")
+            .prepare("SELECT id, name, path, parent_id, is_monitored, mtime_ns FROM folders ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let iter = stmt
@@ -1032,23 +1330,42 @@ impl Database {
                     parent_id: row.get(3)?,
                     is_monitored: row.get::<_, i32>(4)? != 0,
                     asset_count: None,
-                    mtime: row.get(5)?,
+                    mtime: Some(chrono::DateTime::from_timestamp_nanos(row.get(5)?).to_rfc3339()),
                 })
             })
             .map_err(|e| e.to_string())?;
 
-        let mut folders = Vec::new();
-        for f in iter.flatten() {
-            folders.push(f);
-        }
-        Ok(folders)
+        iter.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn get_folder_by_path(&self, path: &str) -> Result<Option<Folder>, String> {
+        use rusqlite::OptionalExtension;
+        let normalized = normalize_windows_path(path);
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT id, name, path, parent_id, is_monitored, mtime_ns
+                 FROM folders WHERE normalized_path = ?1",
+                [normalized],
+                |row| {
+                    Ok(Folder {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        path: row.get(2)?,
+                        parent_id: row.get(3)?,
+                        is_monitored: row.get::<_, i32>(4)? != 0,
+                        asset_count: None,
+                        mtime: Some(chrono::DateTime::from_timestamp_nanos(row.get(5)?).to_rfc3339()),
+                    })
+                },
+            ).optional().map_err(|error| error.to_string())
+        })
     }
 
     /// 获取所有已监控的文件夹（用于启动时自动挂载文件监听器）
     pub fn get_monitored_folders(&self) -> Result<Vec<Folder>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, path, parent_id, is_monitored, mtime FROM folders WHERE is_monitored = 1 ORDER BY name ASC")
+            .prepare("SELECT id, name, path, parent_id, is_monitored, mtime_ns FROM folders WHERE is_monitored = 1 ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let iter = stmt
@@ -1060,148 +1377,82 @@ impl Database {
                     parent_id: row.get(3)?,
                     is_monitored: row.get::<_, i32>(4)? != 0,
                     asset_count: None,
-                    mtime: row.get(5)?,
+                    mtime: Some(chrono::DateTime::from_timestamp_nanos(row.get(5)?).to_rfc3339()),
                 })
             })
             .map_err(|e| e.to_string())?;
 
-        let mut folders = Vec::new();
-        for f in iter.flatten() {
-            folders.push(f);
-        }
-        Ok(folders)
+        iter.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
-    /// 按路径批量删除资产（用于文件监控检测到删除时，兼容斜杠与大小写差异）
+    /// Confirmed filesystem removals retain user state and relations for rediscovery.
     pub fn delete_assets_by_paths(&self, paths: &[String]) -> Result<usize, String> {
-        let conn = self.conn.lock();
-        let mut count = 0usize;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut affected = 0;
         for path in paths {
-            let p_raw = path.trim();
-            let p_bs = p_raw.replace('/', "\\");
-            let p_norm = p_bs.to_lowercase();
-            let affected = conn
-                .execute(
-                    "DELETE FROM assets WHERE path = ?1 OR path = ?2 OR lower(replace(path, '/', '\\')) = ?3",
-                    params![p_raw, p_bs, p_norm],
-                )
-                .map_err(|e| e.to_string())?;
-            count += affected;
+            affected += tx.execute(
+                "UPDATE assets SET deleted_at = ?1, record_version = record_version + 1
+                 WHERE normalized_path = ?2 AND deleted_at IS NULL",
+                params![chrono::Utc::now().timestamp_millis(), normalize_windows_path(path)],
+            ).map_err(|e| e.to_string())?;
         }
-        Ok(count)
+        revision_after_mutation(&tx, affected)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(affected)
     }
 
-    /// 按 ID 批量删除资产（主键删除，最精确且不受路径格式影响）
+    #[cfg(test)]
     pub fn delete_assets_by_ids(&self, ids: &[String]) -> Result<usize, String> {
-        let conn = self.conn.lock();
-        let mut count = 0usize;
-        for id in ids {
-            let affected = conn
-                .execute("DELETE FROM assets WHERE id = ?1", params![id])
-                .unwrap_or(0);
-            count += affected;
-        }
-        Ok(count)
+        self.complete_scan_removals(&[], ids).map(|(_, assets)| assets)
     }
 
-    /// 启动时校验资产有效性：删除数据库中文件已不存在的资产记录
+    /// Called only after a successful traversal and refresh. Cleanup and revision commit together.
+    pub fn complete_scan_removals(
+        &self, folder_paths: &[String], asset_ids: &[String],
+    ) -> Result<(usize, usize), String> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut folders = 0;
+        let mut assets = 0;
+        for path in folder_paths {
+            folders += tx.execute(
+                "DELETE FROM folders WHERE normalized_path = ?1",
+                [normalize_windows_path(path)],
+            ).map_err(|e| e.to_string())?;
+        }
+        for id in asset_ids {
+            assets += tx.execute(
+                "UPDATE assets SET deleted_at = ?1, record_version = record_version + 1
+                 WHERE id = ?2 AND deleted_at IS NULL",
+                params![chrono::Utc::now().timestamp_millis(), id],
+            ).map_err(|e| e.to_string())?;
+        }
+        revision_after_mutation(&tx, folders + assets)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok((folders, assets))
+    }
+
+    /// Startup has no completed scan evidence: an absent/offline path is not a deletion.
+    #[cfg(test)]
     pub fn validate_assets(&self) -> Result<(usize, usize), String> {
-        let assets = self.get_all_assets()?;
-        let total = assets.len();
-        let mut paths_to_delete: Vec<String> = Vec::new();
-        let mut sample_paths: Vec<String> = Vec::new(); // 记录前 5 个路径用于调试
-
-        for (i, asset) in assets.iter().enumerate() {
-            let path = std::path::Path::new(&asset.path);
-            let exists = path.exists();
-            if i < 5 {
-                sample_paths.push(format!("{} (存在: {})", asset.path, exists));
-            }
-            if !exists {
-                paths_to_delete.push(asset.path.clone());
-            }
-        }
-
-        // 输出前 5 个资产路径的检查结果，方便排查为什么 C:/Workspace 等路径未被清理
-        println!("[Validation] 启动资产校验: 共检查 {} 个资产, 删除 {} 个无效路径, 前 5 个样本路径:", total, paths_to_delete.len());
-        for s in &sample_paths {
-            println!("[Validation]   路径: {}", s);
-        }
-
-        let deleted = self.delete_assets_by_paths(&paths_to_delete)?;
-        println!("[Validation] 数据库实际删除记录数: {}", deleted);
-        Ok((total, deleted))
+        Ok((self.asset_count()?, 0))
     }
 
     /// 按路径查询资产（判断文件是否已在数据库中，兼容斜杠与大小写差异）
     pub fn get_asset_by_path(&self, path: &str) -> Result<Option<Asset>, String> {
+        use rusqlite::OptionalExtension;
         let conn = self.conn.lock();
-        let p_raw = path.trim();
-        let p_bs = p_raw.replace('/', "\\");
-        let p_norm = p_bs.to_lowercase();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, path, asset_type, size, folder_id, date_modified, date_added,
-                        rating, favorite, color, width, height, file_hash, thumbnail_url
-                 FROM assets 
-                 WHERE path = ?1 OR path = ?2 OR lower(replace(path, '/', '\\')) = ?3 
-                 LIMIT 1",
-            )
-            .map_err(|e| e.to_string())?;
-
-        let mut rows = stmt
-            .query_map(params![p_raw, p_bs, p_norm], |row| {
-                Ok(Asset {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    asset_type: row.get(3)?,
-                    size: row.get::<_, i64>(4)? as u64,
-                    folder_id: row.get(5)?,
-                    date_modified: row.get(6)?,
-                    date_added: row.get(7)?,
-                    rating: row.get::<_, i32>(8)? as u8,
-                    favorite: row.get::<_, i32>(9)? != 0,
-                    color: row.get(10)?,
-                    width: row.get(11)?,
-                    height: row.get(12)?,
-                    file_hash: row.get(13)?,
-                    thumbnail_url: row.get(14)?,
-                    tags: Vec::new(),
-                    collections: Vec::new(),
-                })
-            })
-            .map_err(|e| e.to_string())?;
-
-        match rows.next() {
-            Some(Ok(asset)) => Ok(Some(asset)),
-            _ => Ok(None),
-        }
+        conn.query_row(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets a
+             LEFT JOIN asset_user_state u ON u.asset_id = a.id
+             WHERE a.normalized_path = ?1 AND a.deleted_at IS NULL"
+        ), [normalize_windows_path(path)], asset_from_row)
+            .optional().map_err(|e| e.to_string())
     }
 
     pub fn insert_folder(&self, folder: &Folder) -> Result<(), String> {
-        let conn = self.conn.lock();
-        // 使用安全 UPSERT（ON CONFLICT DO UPDATE），避免 INSERT OR REPLACE 触发
-        // 级联删除子文件夹/资产。
-        conn.execute(
-            "INSERT INTO folders (id, name, path, parent_id, is_monitored, mtime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                path = excluded.path,
-                parent_id = excluded.parent_id,
-                is_monitored = excluded.is_monitored,
-                mtime = excluded.mtime",
-            params![
-                folder.id,
-                folder.name,
-                folder.path,
-                folder.parent_id,
-                folder.is_monitored as i32,
-                folder.mtime
-            ],
-        ).map_err(|e| e.to_string())?;
-        Ok(())
+        self.upsert_folder(folder)
     }
 
     pub fn rename_folder(&self, id: &str, new_name: &str) -> Result<(), String> {
@@ -1222,120 +1473,77 @@ impl Database {
     }
 
     pub fn update_folder(&self, folder: &Folder) -> Result<(), String> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE folders SET name = ?1, path = ?2, parent_id = ?3, is_monitored = ?4 WHERE id = ?5",
-            params![
-                folder.name,
-                folder.path,
-                folder.parent_id,
-                folder.is_monitored as i32,
-                folder.id,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let affected = tx.execute(
+            "UPDATE folders SET name = ?1, path = ?2, normalized_path = ?3,
+                parent_id = ?4, is_monitored = ?5, record_version = record_version + 1 WHERE id = ?6",
+            params![folder.name, folder.path, normalize_windows_path(&folder.path),
+                folder.parent_id, i32::from(folder.is_monitored), folder.id],
+        ).map_err(|e| e.to_string())?;
+        revision_after_mutation(&tx, affected)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
-    // =========================================================================
-    // 实时对账（Reconcile）支持方法
-    // 磁盘为唯一真相源，数据库只是可丢弃缓存：对账时以磁盘目录/文件 mtime
-    // 为增量信号，只对发生变化的条目做深度重读（详阅 PLAN_realtime_reconcile.md）。
-    // =========================================================================
-
-    /// 以安全 UPSERT 方式写入/更新单个文件夹（含 mtime），供对账增量使用。
-    /// 使用 ON CONFLICT DO UPDATE，避免替换触发级联删除子文件夹/资产。
+    /// Reconciliation updates filesystem facts while retaining the monitoring preference.
     pub fn upsert_folder(&self, folder: &Folder) -> Result<(), String> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO folders (id, name, path, parent_id, is_monitored, mtime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                path = excluded.path,
-                parent_id = excluded.parent_id,
-                is_monitored = excluded.is_monitored,
-                mtime = excluded.mtime",
-            params![
-                folder.id,
-                folder.name,
-                folder.path,
-                folder.parent_id,
-                folder.is_monitored as i32,
-                folder.mtime
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        Self::write_folder(&tx, folder)?;
+        revision_after_mutation(&tx, 1)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     /// 轻量读取某根目录下全部资产的签名 (id, path, date_modified, size)，
     /// 供对账与库内现状比对，避免携带 tags/collections 的额外开销。
+    #[cfg(test)]
     pub fn get_asset_signatures_under(&self, root_path: &str) -> Result<Vec<(String, String, String, i64)>, String> {
-        let root = normalize_root(root_path);
+        let root = normalize_windows_path(root_path);
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, path, date_modified, size FROM assets")
+            .prepare("SELECT id, path, mtime_ns, size FROM assets WHERE deleted_at IS NULL")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    chrono::DateTime::from_timestamp_nanos(row.get(2)?).to_rfc3339(),
                     row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
-        for r in rows.flatten() {
-            if is_path_under(&r.1, &root) {
+        for row in rows {
+            let r = row.map_err(|e| e.to_string())?;
+            if crate::sync::is_path_under(&r.1, &root) {
                 out.push(r);
             }
         }
         Ok(out)
     }
 
-    /// 按文件夹物理路径删除该文件夹及其整棵子孙树（子文件夹与全部资产经外键级联）。
-    /// 返回值表示删除的文件夹行数。
+    /// Remove a confirmed absent folder tree; assets retain user state through SET NULL.
     pub fn delete_folder_tree_by_path(&self, path: &str) -> Result<usize, String> {
-        let conn = self.conn.lock();
-        // folders(parent_id)→folders 与 assets(folder_id)→folders 均为 ON DELETE CASCADE，
-        // 删除父文件夹行即可级联清理整棵子树。
-        let folder_id: Option<String> = conn
-            .query_row("SELECT id FROM folders WHERE path = ?1 LIMIT 1", params![path], |r| r.get(0))
-            .ok();
-        let mut affected = 0usize;
-        if let Some(fid) = folder_id {
-            affected = conn
-                .execute("DELETE FROM folders WHERE id = ?1", params![fid])
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(affected)
+        self.complete_scan_removals(&[path.to_string()], &[]).map(|(folders, _)| folders)
     }
 
-    /// 按物理路径前缀删除资产（如目录重命名/移除后清理旧路径下的孤儿资产）。
+    /// Mark confirmed removals within an exact directory boundary; never cascade user state.
     pub fn delete_assets_by_prefix(&self, prefix: &str) -> Result<usize, String> {
-        let root = normalize_root(prefix);
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare("SELECT path FROM assets")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        let mut doomed: Vec<String> = Vec::new();
-        for r in rows.flatten() {
-            if is_path_under(&r, &root) {
-                doomed.push(r);
-            }
-        }
-        drop(stmt);
-        let mut count = 0usize;
-        if !doomed.is_empty() {
-            count = self.delete_assets_by_paths(&doomed)?;
-        }
-        Ok(count)
+        let root = normalize_windows_path(prefix);
+        let lower = format!("{}\\", root.trim_end_matches('\\'));
+        let upper = format!("{}]", root.trim_end_matches('\\'));
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let affected = tx.execute(
+            "UPDATE assets SET deleted_at = ?1, record_version = record_version + 1
+             WHERE deleted_at IS NULL AND
+                (normalized_path = ?2 OR (normalized_path >= ?3 AND normalized_path < ?4))",
+            params![chrono::Utc::now().timestamp_millis(), root, lower, upper],
+        ).map_err(|e| e.to_string())?;
+        revision_after_mutation(&tx, affected)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(affected)
     }
 
     pub fn get_tags(&self) -> Result<Vec<Tag>, String> {
@@ -1529,6 +1737,7 @@ impl Database {
 
 /// 将用户输入的关键词转为 FTS5 安全搜索表达式
 /// 支持多词 AND 匹配：用户输入多个空格分隔的单词时，全部单词都必须出现
+#[cfg(test)]
 fn build_fts_query(user_input: &str) -> String {
     let words: Vec<&str> = user_input
         .split_whitespace()

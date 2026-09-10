@@ -11,25 +11,16 @@
 
 import type {
   Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats,
+  StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail, AssetMutation, MutationSummary,
 } from '../../../types';
-import type { ApiProvider, ScanResult } from '../types';
-import { normalizeFolders, normalizeAssets, normalizeSmartFolders } from '../utils';
+import type { ApiProvider } from '../types';
 
 /** Web API 统一响应结构 */
 export interface ApiResponse<T> {
   success: boolean;
   data?: T;
   error?: string;
-}
-
-/** Web 工作区载荷结构 */
-export interface WebWorkspacePayload {
-  folders: any[];
-  tags: any[];
-  collections: any[];
-  assets: any[];
-  smartFolders: any[];
 }
 
 // ============================================================================
@@ -133,6 +124,13 @@ async function apiRequest<T>(
   }
 }
 
+function requireData<T>(response: ApiResponse<T>): T {
+  if (!response.success || response.data === undefined) {
+    throw new Error(response.error || 'API response did not include data');
+  }
+  return response.data;
+}
+
 // ============================================================================
 // Web Provider 实现
 // ============================================================================
@@ -142,51 +140,37 @@ class WebApiProvider implements ApiProvider {
   readonly platform = 'web' as const;
   readonly envLabel = '[环境:Web·HTTP]';
 
+  async getWorkspaceShell(): Promise<WorkspaceShell> {
+    return requireData(await apiRequest<WorkspaceShell>('/api/v2/workspace-shell'));
+  }
+
+  async queryAssets(query: AssetQuery): Promise<AssetPage> {
+    return requireData(await apiRequest<AssetPage>('/api/v2/assets/query', {
+      method: 'POST', body: JSON.stringify(query),
+    }));
+  }
+
+  async queryFolders(query: FolderQuery): Promise<FolderPage> {
+    return requireData(await apiRequest<FolderPage>('/api/v2/folders/query', {
+      method: 'POST', body: JSON.stringify(query),
+    }));
+  }
+
+  async getAssetDetails(ids: string[]): Promise<AssetDetail[]> {
+    return requireData(await apiRequest<AssetDetail[]>('/api/v2/assets/details', {
+      method: 'POST', body: JSON.stringify({ ids }),
+    }));
+  }
+
+  async mutateAssets(mutation: AssetMutation): Promise<MutationSummary> {
+    return requireData(await apiRequest<MutationSummary>('/api/v2/assets/mutate', {
+      method: 'POST', body: JSON.stringify(mutation),
+    }));
+  }
+
   // ------------------------------------------------------------------------
   // 数据加载与扫描
   // ------------------------------------------------------------------------
-
-  /** 加载完整工作区数据（未登录或网络失败时优雅降级到演示数据） */
-  async loadWorkspace(): Promise<Partial<AssetState>> {
-    const token = await getAuthToken();
-
-    // 1. 未登录状态：直接加载演示数据，杜绝 401 报错与白屏
-    if (!token) {
-      console.info('[WebApi] 用户未登录，加载演示工作区');
-      const { mockFolders, mockTags, mockCollections, mockAssets } = await import('../../../data');
-      return {
-        folders: normalizeFolders(mockFolders),
-        tags: mockTags,
-        collections: mockCollections,
-        customSmartFolders: [],
-        assets: normalizeAssets(mockAssets),
-      };
-    }
-
-    // 2. 已登录状态：从云端 PostgreSQL 加载用户个人资产
-    const result = await apiRequest<WebWorkspacePayload>('/api/workspace');
-    if (!result.success || !result.data) {
-      console.warn('[WebApi] 云端工作区加载失败，降级展示本地演示数据:', result.error);
-      const { mockFolders, mockTags, mockCollections, mockAssets } = await import('../../../data');
-      return {
-        folders: normalizeFolders(mockFolders),
-        tags: mockTags,
-        collections: mockCollections,
-        customSmartFolders: [],
-        assets: normalizeAssets(mockAssets),
-      };
-    }
-
-    const { folders, tags, collections, assets, smartFolders } = result.data;
-
-    return {
-      folders: normalizeFolders(folders || []),
-      tags: tags || [],
-      collections: collections || [],
-      customSmartFolders: normalizeSmartFolders(smartFolders || []),
-      assets: normalizeAssets(assets || []),
-    };
-  }
 
   /** 一键初始化示例工作区数据（Web端首次登录提供） */
   async seedWorkspace(): Promise<boolean> {
@@ -196,15 +180,10 @@ class WebApiProvider implements ApiProvider {
     return !!result.data?.seeded;
   }
 
-  /** Web 模式暂不支持本地目录扫描 */
-  async scanDirectory(_path: string): Promise<ScanResult | null> {
+  /** Web 模式不支持后台目录扫描 */
+  async startScanDirectory(_path: string): Promise<string | null> {
     console.warn('[WebApi] Web 模式不支持本地文件扫描');
     return null;
-  }
-
-  /** Web 模式不支持后台目录扫描 */
-  async startScanDirectory(_path: string): Promise<void> {
-    console.warn('[WebApi] Web 模式不支持本地文件扫描');
   }
 
   /** Web 模式使用 HTTP 缩略图 URL */
@@ -213,29 +192,16 @@ class WebApiProvider implements ApiProvider {
     return existingThumbnailUrl || null;
   }
 
-  /** Web 模式无本地资产校验需求 */
-  async validateAssets(): Promise<void> {
-    // No-op in Web mode
-  }
-
-  /** Web 模式无需本地对账 */
-  async reconcileMonitoredFolders(): Promise<any> {
-    return { folders_added: 0, folders_removed: 0, folders_updated: 0, assets_added: 0, assets_removed: 0, assets_updated: 0 };
-  }
-
   // ------------------------------------------------------------------------
   // 资产操作
   // ------------------------------------------------------------------------
 
   async setAssetRating(id: string, rating: number): Promise<void> {
-    await apiRequest(`/api/assets/${id}/rating`, {
-      method: 'PATCH',
-      body: JSON.stringify({ rating }),
-    });
+    await this.mutateAssets({ operationId: crypto.randomUUID(), ids: [id], patch: { rating } });
   }
 
-  async setAssetFavorite(_id: string, _favorite: boolean): Promise<void> {
-    // Web schema 暂无收藏字段，保留接口兼容
+  async setAssetFavorite(id: string, favorite: boolean): Promise<void> {
+    await this.mutateAssets({ operationId: crypto.randomUUID(), ids: [id], patch: { favorite } });
   }
 
   async deleteAssets(ids: string[]): Promise<void> {

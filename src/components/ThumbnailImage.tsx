@@ -17,13 +17,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Asset } from '../types';
 import { dataService, isTauriDesktop } from '../services/dataService';
 import { Loader2 } from 'lucide-react';
+import { ThumbnailMemoryCache } from '../services/thumbnailMemoryCache';
 
 /**
  * 内存缩略图缓存（跨组件与滚动生命周期持久）：
  * - 避免列表滚动时重复触发 Rust IPC 跨进程数据传输
  * - 避免重新反序列化数十 KB 的 base64 字符串造成主线程卡顿
  */
-const thumbnailCache = new Map<string, string>();
+const thumbnailCache = new ThumbnailMemoryCache(256);
 
 /** 已触发过重新生成的资产 ID 集合（防止 onError 死循环重试） */
 const regenerationAttempted = new Set<string>();
@@ -55,6 +56,8 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
   const cacheKey = asset.id;
   const isDesktop = useRef(isTauriDesktop()).current;
   const mountedRef = useRef(true);
+  const viewportRef = useRef<HTMLSpanElement>(null);
+  const [nearViewport, setNearViewport] = useState(!isDesktop);
 
   // 初始 URL：优先从内存缓存读取；
   // Web 环境下若无缓存但 asset.thumbnailUrl 存在，直接使用（无需 IPC）。
@@ -64,6 +67,22 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
   const [loadingState, setLoadingState] = useState<'idle' | 'loading' | 'done' | 'failed'>(
     cachedUrl ? 'done' : 'idle'
   );
+
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element || typeof IntersectionObserver === 'undefined') {
+      setNearViewport(true);
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        setNearViewport(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: '400px' });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [cacheKey]);
   /**
    * 加载缩略图。
    * @param forceRegenerate - 为 true 时跳过已有的 thumbnailUrl 缓存路径，
@@ -126,6 +145,9 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
 
   useEffect(() => {
     mountedRef.current = true;
+    if (!nearViewport) {
+      return () => { mountedRef.current = false; };
+    }
 
     // 如果内存缓存中已有，直接使用
     const hit = thumbnailCache.get(cacheKey);
@@ -155,7 +177,7 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
     return () => {
       mountedRef.current = false;
     };
-  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop, loadThumbnail]);
+  }, [cacheKey, asset.id, asset.path, asset.thumbnailUrl, isDesktop, loadThumbnail, nearViewport]);
 
   /**
    * 处理 <img> 加载失败事件：
@@ -273,25 +295,27 @@ export function ThumbnailImage({ asset, className, alt, fallbackIcon, loading = 
   // 缩略图加载完成 → 显示图片
   if (thumbUrl && loadingState !== 'failed') {
     return (
-      <img
-        src={thumbUrl}
-        alt={alt || asset.name}
-        className={className}
-        loading={loading}
-        onError={handleImageError}
-      />
+      <span ref={viewportRef} className="w-full h-full flex items-center justify-center">
+        <img
+          src={thumbUrl}
+          alt={alt || asset.name}
+          className={className}
+          loading={loading}
+          onError={handleImageError}
+        />
+      </span>
     );
   }
 
   // 缩略图加载中 → 显示加载动画
   if (loadingState === 'loading') {
-    return <Loader2 size={24} className="animate-spin text-neutral-500" />;
+    return <span ref={viewportRef} className="w-full h-full flex items-center justify-center"><Loader2 size={24} className="animate-spin text-neutral-500" /></span>;
   }
 
   // 加载失败或无缩略图 → 显示占位图标（如果有）
   if (fallbackIcon) {
-    return <>{fallbackIcon}</>;
+    return <span ref={viewportRef} className="w-full h-full flex items-center justify-center">{fallbackIcon}</span>;
   }
 
-  return null;
+  return <span ref={viewportRef} className="w-full h-full" />;
 }
