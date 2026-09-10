@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type React from 'react';
-import { runtime } from '../services/api';
 import { dataService } from '../services/dataService';
 import type { AssetState } from '../types';
 
@@ -28,36 +27,6 @@ export async function handleConfirmAddAndScan(
 
   if (existingParent) {
     detectedParentId = existingParent.id;
-  }
-
-  if (runtime.isDesktop) {
-    const result = await dataService.scanDirectory(folderPath.trim());
-    if (result) {
-      const root = {
-        ...result.root_folder,
-        name: folderName || result.root_folder.name,
-        isMonitored: true,
-        parentId: detectedParentId || result.root_folder.parentId,
-      };
-
-      const updatedExisting = state.folders.map(f => {
-        const p = f.path.toLowerCase().replace(/[/\\]+$/, '');
-        if (p.startsWith(cleanInput + '\\') || p.startsWith(cleanInput + '/')) {
-          return { ...f, parentId: root.id };
-        }
-        return f;
-      });
-
-      setState(p => ({
-        ...p,
-        folders: [...updatedExisting, root, ...result.sub_folders],
-        assets: [...p.assets, ...result.assets],
-        activeFolderId: root.id,
-        activeSidebarTab: 'folders',
-        expandedFolderIds: Array.from(new Set([...p.expandedFolderIds, root.id, ...(detectedParentId ? [detectedParentId] : [])]))
-      }));
-      return;
-    }
   }
 
   // Web 预览环境模拟真实嵌套添加与扫描流程

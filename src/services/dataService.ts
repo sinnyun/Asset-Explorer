@@ -12,8 +12,7 @@
  */
 
 import { apiClient } from './api';
-import type { Folder, Tag, Collection, SmartFolder, AssetState, WorkspaceShell, AssetQuery, AssetPage, FolderQuery, FolderPage, AssetDetail } from '../types';
-import type { ScanResult } from './api/types';
+import type { Folder, Tag, Collection, SmartFolder, WorkspaceShell, AssetQuery, AssetPage, FolderQuery, FolderPage, AssetDetail, AssetMutation, MutationSummary } from '../types';
 
 // ============================================================================
 // 兼容导出：保留原有 isTauriDesktop / 环境判断 API
@@ -34,13 +33,6 @@ class DataService {
   // 数据加载
   // ------------------------------------------------------------------------
 
-  /** 异步加载工作区数据 */
-  async loadWorkspace(): Promise<Partial<AssetState>> {
-    this.log('loadWorkspace', '通过统一 API 中间件加载');
-    const result = await apiClient.loadWorkspace();
-    return result;
-  }
-
   getWorkspaceShell(): Promise<WorkspaceShell> {
     return apiClient.getWorkspaceShell();
   }
@@ -57,10 +49,8 @@ class DataService {
     return apiClient.getAssetDetails(ids);
   }
 
-  /** 异步触发后端扫描并持久化目录 */
-  async scanDirectory(dirPath: string): Promise<ScanResult | null> {
-    this.log('scanDirectory', `扫描目录: ${dirPath}`);
-    return await apiClient.scanDirectory(dirPath);
+  mutateAssets(mutation: AssetMutation): Promise<MutationSummary> {
+    return apiClient.mutateAssets(mutation);
   }
 
   /** 后台增量扫描本地目录（事件流推送进度与增量资产），命令立即返回 */
@@ -90,18 +80,6 @@ class DataService {
       }
     }
     return null;
-  }
-
-  /** 校验资产有效性 */
-  async validateAssets(): Promise<void> {
-    await apiClient.validateAssets();
-  }
-
-  /** 对全部监视文件夹执行一次完整的磁盘对账同步 */
-  async reconcileMonitoredFolders(): Promise<any> {
-    if (apiClient.reconcileMonitoredFolders) {
-      return await apiClient.reconcileMonitoredFolders();
-    }
   }
 
   // ------------------------------------------------------------------------
@@ -172,8 +150,8 @@ class DataService {
       }
     }
     // 降级：Web 模式或 IPC 失败时
-    const state = await apiClient.loadWorkspace();
-    const target = (state.folders || []).find(f => f.id === id);
+    const shell = await apiClient.getWorkspaceShell();
+    const target = shell.roots.find(f => f.id === id);
     if (target) {
       apiClient.updateFolder({ ...target, name: newName }).catch(console.error);
     }

@@ -1,7 +1,7 @@
 import express from 'express';
-import { and, asc, desc, eq, ilike, inArray, isNull, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, ilike, inArray, isNull, notInArray, sql, type SQL } from 'drizzle-orm';
 import { db } from '../db/index.ts';
-import { assetCollections, assets, assetTags, collections, folders, smartFolders, tags } from '../db/schema.ts';
+import { assetCollections, assets, assetTags, collections, folders, mutationOperations, smartFolders, tags } from '../db/schema.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
 import { decodeOffsetCursor, encodeOffsetCursor, normalizeV2PageLimit } from './v2Contract.ts';
 
@@ -138,4 +138,78 @@ v2Router.post('/v2/assets/details', async (req: AuthRequest, res) => {
       return row ? [{ ...summary(row), normalizedPath: row.path.toLocaleLowerCase(), customName: row.customName ?? undefined, notes: row.notes ?? undefined }] : [];
     }));
   } catch (error) { sendFailure(res, error); }
+});
+
+v2Router.post('/v2/assets/mutate', async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const operationId = typeof req.body?.operationId === 'string' ? req.body.operationId.trim() : '';
+    const ids: string[] = Array.isArray(req.body?.ids)
+      ? Array.from(new Set<string>((req.body.ids as unknown[]).map(value => String(value))))
+      : [];
+    const selection = req.body?.selection;
+    if (!operationId) return res.status(400).json({ error: 'operationId is required' });
+    if ((ids.length === 0) === !selection || ids.length > 1_000) return res.status(400).json({ error: 'provide ids or selection, but not both' });
+    const excludedIds: string[] = selection && Array.isArray(selection.excludedIds)
+      ? Array.from(new Set<string>((selection.excludedIds as unknown[]).map(value => String(value))))
+      : [];
+    if (excludedIds.length > 400) return res.status(400).json({ error: 'at most 400 exclusions are allowed' });
+    const patch = req.body?.patch ?? {};
+    if (patch.rating !== undefined && (!Number.isInteger(patch.rating) || patch.rating < 0 || patch.rating > 5)) {
+      return res.status(400).json({ error: 'rating must be an integer from 0 to 5' });
+    }
+    if (patch.favorite !== undefined && typeof patch.favorite !== 'boolean') return res.status(400).json({ error: 'favorite must be boolean' });
+
+    const result = await db.transaction(async tx => {
+      const [existing] = await tx.select().from(mutationOperations)
+        .where(and(eq(mutationOperations.userId, userId), eq(mutationOperations.operationId, operationId))).limit(1);
+      if (existing) return { affected: existing.affected, revision: existing.revision };
+
+      const targetConditions: SQL[] = [eq(assets.userId, userId)];
+      if (selection) {
+        const query = selection.query ?? {};
+        if (query.folderId) {
+          if (query.includeDescendants) {
+            const [folder] = await tx.select({ path: folders.path }).from(folders)
+              .where(and(eq(folders.userId, userId), eq(folders.id, String(query.folderId)))).limit(1);
+            if (!folder) throw new Error('mutation conflict');
+            targetConditions.push(ilike(assets.path, `${folder.path.replace(/[\\/]$/, '')}/%`));
+          } else targetConditions.push(eq(assets.folderId, String(query.folderId)));
+        }
+        if (typeof query.search === 'string' && query.search.trim()) targetConditions.push(ilike(assets.name, `%${query.search.trim()}%`));
+        if (Array.isArray(query.types) && query.types.length) targetConditions.push(inArray(assets.type, query.types.slice(0, 100).map(String)));
+        if (typeof query.rating === 'number') targetConditions.push(eq(assets.rating, query.rating));
+        if (typeof query.favorite === 'boolean') targetConditions.push(eq(assets.favorite, query.favorite));
+        if (Array.isArray(query.tagIds) && query.tagIds.length) targetConditions.push(inArray(assets.id, tx.select({ id: assetTags.assetId }).from(assetTags).where(inArray(assetTags.tagId, query.tagIds.slice(0, 100).map(String)))));
+        if (Array.isArray(query.collectionIds) && query.collectionIds.length) targetConditions.push(inArray(assets.id, tx.select({ id: assetCollections.assetId }).from(assetCollections).where(inArray(assetCollections.collectionId, query.collectionIds.slice(0, 100).map(String)))));
+        if (excludedIds.length) targetConditions.push(notInArray(assets.id, excludedIds));
+      } else {
+        targetConditions.push(inArray(assets.id, ids));
+      }
+      await tx.execute(sql`CREATE TEMP TABLE mutation_targets ON COMMIT DROP AS SELECT ${assets.id} AS id FROM ${assets} WHERE ${and(...targetConditions)}`);
+      const countResult: any = await tx.execute(sql`SELECT COUNT(*)::int AS count FROM mutation_targets`);
+      const affected = Number(countResult.rows?.[0]?.count ?? countResult[0]?.count ?? 0);
+      const expectedVersion = req.body?.expectedVersion;
+      if ((!selection && affected !== ids.length)) {
+        throw new Error('mutation conflict');
+      }
+      if (expectedVersion !== undefined) {
+        const conflictResult: any = await tx.execute(sql`SELECT COUNT(*)::int AS count FROM ${assets} a JOIN mutation_targets t ON t.id=a.id WHERE a.record_version<>${expectedVersion}`);
+        const conflicts = Number(conflictResult.rows?.[0]?.count ?? conflictResult[0]?.count ?? 0);
+        if (conflicts > 0) throw new Error('mutation conflict');
+      }
+      const values: Record<string, unknown> = { recordVersion: sql`${assets.recordVersion} + 1` };
+      if (patch.rating !== undefined) values.rating = patch.rating;
+      if (patch.favorite !== undefined) values.favorite = patch.favorite;
+      if (patch.color !== undefined) values.color = String(patch.color);
+      await tx.update(assets).set(values).where(and(eq(assets.userId, userId), inArray(assets.id, sql`SELECT id FROM mutation_targets`)));
+      const revision = Date.now();
+      await tx.insert(mutationOperations).values({ userId, operationId, affected, revision });
+      return { affected, revision };
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'mutation conflict') return res.status(409).json({ error: error.message });
+    sendFailure(res, error);
+  }
 });

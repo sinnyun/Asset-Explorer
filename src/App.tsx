@@ -112,19 +112,27 @@ export default function App() {
 
   // 单资产标签/集合关联编辑（右侧详情面板底部）
   const updateAssetTags = (assetId: string, tagIds: string[]) => {
+    const previous = state.assets.find(asset => asset.id === assetId)?.tags ?? [];
     setState(prev => ({
       ...prev,
       assets: prev.assets.map(a => a.id === assetId ? { ...a, tags: tagIds } : a)
     }));
-    dataService.syncAssetTags(assetId, tagIds).catch(console.error);
+    dataService.syncAssetTags(assetId, tagIds).catch(error => {
+      console.error(error);
+      setState(prev => ({ ...prev, assets: prev.assets.map(asset => asset.id === assetId ? { ...asset, tags: previous } : asset) }));
+    });
   };
 
   const updateAssetCollections = (assetId: string, collectionIds: string[]) => {
+    const previous = state.assets.find(asset => asset.id === assetId)?.collections ?? [];
     setState(prev => ({
       ...prev,
       assets: prev.assets.map(a => a.id === assetId ? { ...a, collections: collectionIds } : a)
     }));
-    dataService.syncAssetCollections(assetId, collectionIds).catch(console.error);
+    dataService.syncAssetCollections(assetId, collectionIds).catch(error => {
+      console.error(error);
+      setState(prev => ({ ...prev, assets: prev.assets.map(asset => asset.id === assetId ? { ...asset, collections: previous } : asset) }));
+    });
   };
 
   // 右键菜单操作

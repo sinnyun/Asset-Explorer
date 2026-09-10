@@ -876,7 +876,7 @@ fn background_scan_command_uses_compact_streaming_events() {
     let commands = include_str!("commands.rs");
     assert!(commands.contains("scan_local_directory_streaming"));
     let start = commands.find("pub async fn start_scan_directory").unwrap();
-    let end = commands[start..].find("/// 指令 2b").unwrap() + start;
+    let end = commands[start..].find("/// Explicit, cancellable full-root recovery.").unwrap() + start;
     let implementation = &commands[start..end];
     assert!(!implementation.contains("\"assets\":"), "scan events must invalidate queries instead of sending asset objects");
     assert!(!implementation.contains("sub_folders"), "scan events must not send the complete folder tree");
@@ -1157,4 +1157,88 @@ fn diagnostics_are_registered_and_scale_fixture_has_path_guards() {
     assert!(script.contains("$target -eq $profile"));
     assert!(script.contains("-not $AllowNonEmpty"));
     assert!(script.contains("SetLength($SparseLargeFileBytes)"));
+}
+
+#[test]
+fn legacy_full_snapshot_and_automatic_maintenance_commands_are_not_registered() {
+    let main = include_str!("main.rs");
+    for command in ["load_workspace,", "scan_directory,", "validate_assets,", "reconcile_monitored_folders,", "aggregate_data,", "filter_by_smart_folder,"] {
+        assert!(!main.lines().any(|line| line.trim() == command), "legacy runtime command still registered: {command}");
+    }
+    assert!(!main.lines().any(|line| line.trim() == "search_assets,"));
+}
+
+#[test]
+fn asset_mutations_are_idempotent_and_reject_stale_versions() {
+    use crate::models::{AssetMutation, AssetMutationPatch};
+    let (_dir, db) = test_db("mutation-idempotency");
+    db.upsert_file_facts(&[fact("a", r"d:\assets\a.png", 100, 10)]).unwrap();
+    let command = AssetMutation {
+        operation_id: "operation-1".into(),
+        ids: vec!["a".into()],
+        selection: None,
+        expected_version: Some(1),
+        patch: AssetMutationPatch { rating: Some(4), favorite: Some(true), color: None },
+    };
+    let first = db.mutate_assets(&command).unwrap();
+    let duplicate = db.mutate_assets(&command).unwrap();
+    assert_eq!(first, duplicate);
+    let detail = db.get_asset_detail("a").unwrap().unwrap();
+    assert_eq!((detail.rating, detail.favorite, detail.record_version), (4, true, 2));
+
+    let stale = AssetMutation { operation_id: "operation-2".into(), expected_version: Some(1), ..command };
+    assert!(db.mutate_assets(&stale).unwrap_err().contains("conflict"));
+}
+
+#[test]
+fn asset_mutation_rejects_unbounded_explicit_id_lists() {
+    use crate::models::{AssetMutation, AssetMutationPatch};
+    let (_dir, db) = test_db("mutation-limit");
+    let command = AssetMutation {
+        operation_id: "too-many".into(),
+        ids: (0..1001).map(|value| value.to_string()).collect(),
+        selection: None,
+        expected_version: None,
+        patch: AssetMutationPatch::default(),
+    };
+    assert!(db.mutate_assets(&command).is_err());
+}
+
+#[test]
+fn v2_mutation_command_is_registered() {
+    let main = include_str!("main.rs");
+    let desktop = include_str!("../../src/services/api/providers/desktop.ts");
+    assert!(main.contains("mutate_assets_v2,"));
+    assert!(main.contains("start_integrity_job_v2,"));
+    assert!(main.contains("read_asset_range_v2,"));
+    assert!(desktop.contains("'mutate_assets_v2'"));
+    assert!(!desktop.contains("'set_asset_rating'"));
+    assert!(!desktop.contains("'set_asset_favorite'"));
+}
+
+#[test]
+fn query_selection_mutates_matching_assets_without_materializing_ids_in_the_ui() {
+    use crate::models::{AssetMutation, AssetMutationPatch, AssetQuery, SelectionExpression};
+    let (_dir, db) = test_db("mutation-selection");
+    let mut image_a = fact("a", r"d:\assets\a.png", 100, 10);
+    image_a.asset_type = "image".into();
+    let mut image_b = fact("b", r"d:\assets\b.png", 100, 10);
+    image_b.asset_type = "image".into();
+    let mut document = fact("c", r"d:\assets\c.pdf", 100, 10);
+    document.asset_type = "document".into();
+    db.upsert_file_facts(&[image_a, image_b, document]).unwrap();
+    let mutation = AssetMutation {
+        operation_id: "query-operation".into(),
+        ids: vec![],
+        selection: Some(SelectionExpression {
+            query: AssetQuery { types: vec!["image".into()], ..AssetQuery::default() },
+            excluded_ids: vec!["b".into()],
+        }),
+        expected_version: None,
+        patch: AssetMutationPatch { rating: Some(5), ..AssetMutationPatch::default() },
+    };
+    assert_eq!(db.mutate_assets(&mutation).unwrap().affected, 1);
+    assert_eq!(db.get_asset_detail("a").unwrap().unwrap().rating, 5);
+    assert_eq!(db.get_asset_detail("b").unwrap().unwrap().rating, 0);
+    assert_eq!(db.get_asset_detail("c").unwrap().unwrap().rating, 0);
 }

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// 文件系统可重建事实。该类型刻意不包含任何用户标记字段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,6 +29,7 @@ pub struct FileFact {
 }
 
 /// 用户可编辑状态补丁，与文件事实写入通道完全分离。
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AssetUserPatch {
     #[serde(rename = "assetId")]
@@ -42,6 +42,7 @@ pub struct AssetUserPatch {
     pub notes: Option<String>,
 }
 
+#[cfg(test)]
 impl AssetUserPatch {
     pub fn rating(asset_id: impl Into<String>, rating: u8) -> Self {
         Self {
@@ -56,6 +57,31 @@ impl AssetUserPatch {
 pub struct MutationSummary {
     pub affected: usize,
     pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AssetMutationPatch {
+    pub rating: Option<u8>,
+    pub favorite: Option<bool>,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetMutation {
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
+    pub ids: Vec<String>,
+    pub selection: Option<SelectionExpression>,
+    #[serde(rename = "expectedVersion")]
+    pub expected_version: Option<i64>,
+    pub patch: AssetMutationPatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectionExpression {
+    pub query: AssetQuery,
+    #[serde(rename = "excludedIds")]
+    pub excluded_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -313,6 +339,7 @@ pub struct SmartFolder {
 }
 
 /// 文件夹扫描结果报告
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanResult {
     pub root_folder: Folder,
@@ -320,18 +347,4 @@ pub struct ScanResult {
     pub assets: Vec<Asset>,
     pub total_files_scanned: usize,
     pub total_duration_ms: u128,
-}
-
-/// 数据聚合结果 (Aggregation Report)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AggregationReport {
-    pub total_assets: usize,
-    pub total_bytes: u64,
-    pub type_counts: HashMap<String, usize>,
-    pub tag_counts: HashMap<String, usize>,
-    pub collection_counts: HashMap<String, usize>,
-    pub folder_counts: HashMap<String, usize>,
-    pub rating_distribution: HashMap<u8, usize>,
-    pub size_buckets: HashMap<String, usize>, // e.g. "< 1MB", "1MB - 10MB", "> 10MB"
-    pub format_extensions: HashMap<String, usize>,
 }

@@ -82,6 +82,14 @@ export const smartFolders = pgTable('smart_folders', {
   rulesJson: jsonb('rules_json').notNull(),
 });
 
+export const mutationOperations = pgTable('mutation_operations', {
+  userId: varchar('user_id').references(() => users.id).notNull(),
+  operationId: varchar('operation_id').notNull(),
+  affected: integer('affected').notNull(),
+  revision: bigint('revision', { mode: 'number' }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, table => [primaryKey({ columns: [table.userId, table.operationId] })]);
+
 export const usersRelations = relations(users, ({ many }) => ({
   folders: many(folders),
   assets: many(assets),

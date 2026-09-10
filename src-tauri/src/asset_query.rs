@@ -43,6 +43,55 @@ fn decode_cursor(value: &str, expected_sort: AssetSort) -> Result<AssetCursor, S
     Ok(cursor)
 }
 
+pub(crate) fn append_asset_filters(query: &AssetQuery, sql: &mut String, values: &mut Vec<Value>) {
+    if let Some(root_id) = query.root_id.as_ref() {
+        sql.push_str(" AND a.root_id = ?");
+        values.push(root_id.clone().into());
+    }
+    if let Some(folder_id) = query.folder_id.as_ref() {
+        if query.include_descendants {
+            sql.push_str(
+                " AND a.folder_id IN (
+                    WITH RECURSIVE subtree(id) AS (
+                        SELECT id FROM folders WHERE id = ?
+                        UNION ALL
+                        SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+                    ) SELECT id FROM subtree
+                )",
+            );
+        } else {
+            sql.push_str(" AND a.folder_id = ?");
+        }
+        values.push(folder_id.clone().into());
+    }
+    if let Some(search) = query.search.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        sql.push_str(" AND a.rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)");
+        values.push(format!("\"{}\"", search.replace('"', "\"\"")).into());
+    }
+    if !query.types.is_empty() {
+        sql.push_str(" AND a.asset_type IN (");
+        sql.push_str(&vec!["?"; query.types.len()].join(","));
+        sql.push(')');
+        values.extend(query.types.iter().cloned().map(Value::from));
+    }
+    if let Some(rating) = query.rating {
+        sql.push_str(" AND COALESCE(u.rating, 0) = ?");
+        values.push(i64::from(rating.min(5)).into());
+    }
+    if let Some(favorite) = query.favorite {
+        sql.push_str(" AND COALESCE(u.favorite, 0) = ?");
+        values.push(i64::from(favorite).into());
+    }
+    for tag_id in &query.tag_ids {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM asset_tags at WHERE at.asset_id = a.id AND at.tag_id = ?)");
+        values.push(tag_id.clone().into());
+    }
+    for collection_id in &query.collection_ids {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM asset_collections ac WHERE ac.asset_id = a.id AND ac.collection_id = ?)");
+        values.push(collection_id.clone().into());
+    }
+}
+
 impl Database {
     pub fn query_assets(&self, query: &AssetQuery) -> Result<AssetPage, String> {
         let query = query.clone();
@@ -58,52 +107,7 @@ impl Database {
             );
             let mut values: Vec<Value> = Vec::new();
 
-            if let Some(root_id) = query.root_id.as_ref() {
-                sql.push_str(" AND a.root_id = ?");
-                values.push(root_id.clone().into());
-            }
-            if let Some(folder_id) = query.folder_id.as_ref() {
-                if query.include_descendants {
-                    sql.push_str(
-                        " AND a.folder_id IN (
-                            WITH RECURSIVE subtree(id) AS (
-                                SELECT id FROM folders WHERE id = ?
-                                UNION ALL
-                                SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
-                            ) SELECT id FROM subtree
-                        )",
-                    );
-                } else {
-                    sql.push_str(" AND a.folder_id = ?");
-                }
-                values.push(folder_id.clone().into());
-            }
-            if let Some(search) = query.search.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                sql.push_str(" AND a.rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)");
-                values.push(format!("\"{}\"", search.replace('"', "\"\"")).into());
-            }
-            if !query.types.is_empty() {
-                sql.push_str(" AND a.asset_type IN (");
-                sql.push_str(&vec!["?"; query.types.len()].join(","));
-                sql.push(')');
-                values.extend(query.types.iter().cloned().map(Value::from));
-            }
-            if let Some(rating) = query.rating {
-                sql.push_str(" AND COALESCE(u.rating, 0) = ?");
-                values.push(i64::from(rating.min(5)).into());
-            }
-            if let Some(favorite) = query.favorite {
-                sql.push_str(" AND COALESCE(u.favorite, 0) = ?");
-                values.push(i64::from(favorite).into());
-            }
-            for tag_id in &query.tag_ids {
-                sql.push_str(" AND EXISTS (SELECT 1 FROM asset_tags at WHERE at.asset_id = a.id AND at.tag_id = ?)");
-                values.push(tag_id.clone().into());
-            }
-            for collection_id in &query.collection_ids {
-                sql.push_str(" AND EXISTS (SELECT 1 FROM asset_collections ac WHERE ac.asset_id = a.id AND ac.collection_id = ?)");
-                values.push(collection_id.clone().into());
-            }
+            append_asset_filters(&query, &mut sql, &mut values);
 
             if let Some(raw_cursor) = query.cursor.as_ref() {
                 let cursor = decode_cursor(raw_cursor, query.sort)?;

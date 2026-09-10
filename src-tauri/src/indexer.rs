@@ -5,7 +5,9 @@
 //! ============================================================================
 
 use crate::metadata_extractor;
-use crate::models::{Asset, Folder, ScanResult};
+use crate::models::{Asset, Folder};
+#[cfg(test)]
+use crate::models::ScanResult;
 use chrono::Utc;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -334,6 +336,7 @@ fn scan_local_path_streaming(
 /// 扫描指定本地目录并返回完整的文件夹树与资产列表
 /// 使用 ignore::WalkBuilder 支持 .gitignore 规则
 /// 使用多线程加速处理与元数据获取
+#[cfg(test)]
 pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
     let start_time = Instant::now();
     let root_path = PathBuf::from(root_path_str);
@@ -464,6 +467,7 @@ pub fn scan_local_directory(root_path_str: &str) -> Result<ScanResult, String> {
 ///
 /// on_start：目录树构建完成、资产分批前回调，用于先持久化并广播根目录/子目录与文件总数。
 /// on_chunk：每解析完一批资产回调，用于增量写库并上报进度，实现边扫边显示。
+#[cfg(test)]
 #[cfg(test)]
 pub fn scan_local_directory_incremental(
     root_path_str: &str,

@@ -167,6 +167,25 @@ export interface SelectionExpression {
   excludedIds: string[];
 }
 
+export interface AssetMutationPatch {
+  rating?: number;
+  favorite?: boolean;
+  color?: string;
+}
+
+export interface AssetMutation {
+  operationId: string;
+  ids: string[];
+  selection?: SelectionExpression;
+  expectedVersion?: number;
+  patch: AssetMutationPatch;
+}
+
+export interface MutationSummary {
+  affected: number;
+  revision: number;
+}
+
 export interface StorageStats {
   data_dir: string;
   db_size_bytes: number;

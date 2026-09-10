@@ -1,7 +1,6 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod aggregator;
 mod asset_query;
 mod commands;
 mod database;
@@ -11,6 +10,7 @@ mod indexer;
 mod metadata_extractor;
 mod metrics;
 mod models;
+mod preview_stream;
 mod sync;
 mod thumbnail_cache;
 mod thumbnail_jobs;
@@ -100,17 +100,15 @@ fn main() {
             query_assets_v2,
             query_folders_v2,
             get_asset_details_v2,
-            load_workspace,
-            scan_directory,
+            mutate_assets_v2,
             start_scan_directory,
+            start_integrity_job_v2,
             cancel_job_v2,
             get_job_status_v2,
             get_diagnostics_v2,
+            read_asset_range_v2,
             watch_folder,
             unwatch_folder,
-            search_assets,
-            set_asset_rating,
-            set_asset_favorite,
             delete_assets,
             sync_asset_tags,
             sync_asset_collections,
@@ -130,8 +128,6 @@ fn main() {
             delete_collection,
             save_smart_folder,
             delete_smart_folder,
-            aggregate_data,
-            filter_by_smart_folder,
             get_file_metadata,
             get_thumbnail,
             open_in_file_manager,
@@ -139,10 +135,8 @@ fn main() {
             get_storage_stats,
             migrate_data_storage,
             restart_application,
-            validate_assets,
             read_thumbnail_base64,
             file_exists,
-            reconcile_monitored_folders
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 桌面客户端失败");

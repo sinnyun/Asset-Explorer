@@ -6,14 +6,17 @@
 //! ============================================================================
 
 use crate::models::{
-    Asset, AssetUserPatch, Collection, FileFact, Folder, MutationSummary,
+    Asset, AssetMutation, Collection, FileFact, Folder, MutationSummary,
     SmartFolder, SmartFolderRule, Tag,
 };
+#[cfg(test)]
+use crate::models::AssetUserPatch;
 #[cfg(test)]
 use crate::models::AssetDetail;
 use parking_lot::{Condvar, Mutex};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -211,12 +214,14 @@ impl WriteActor {
 }
 
 /// 批量关联映射：asset_id → Vec<name_or_id>
+#[cfg(test)]
 type AssocMap = HashMap<String, Vec<String>>;
 
 /// 单条 SQL 语句中允许的最大绑定参数数量。
 /// SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER=999，为稳妥起见取 500，
 /// 避免大量资产时单个 `IN (...)` 查询超出该上限而报
 /// "too many SQL variables" 错误。
+#[cfg(test)]
 const SQLITE_VAR_LIMIT: usize = 500;
 
 /// V2 uses a separate database; no legacy database is opened or relocated.
@@ -782,6 +787,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn patch_user_state(&self, patch: &AssetUserPatch) -> Result<MutationSummary, String> {
         let patch = patch.clone();
         self.write(move |conn| {
@@ -803,6 +809,108 @@ impl Database {
             ).map_err(|e| format!("更新用户状态失败: {e}"))?;
             let revision = revision_after_mutation(&tx, affected)?;
             tx.commit().map_err(|e| format!("提交用户状态失败: {e}"))?;
+            Ok(MutationSummary { affected, revision })
+        })
+    }
+
+    pub fn mutate_assets(&self, command: &AssetMutation) -> Result<MutationSummary, String> {
+        if command.operation_id.trim().is_empty() {
+            return Err("operationId is required".to_string());
+        }
+        let mut ids = command.ids.clone();
+        ids.sort();
+        ids.dedup();
+        let has_selection = command.selection.is_some();
+        if (ids.is_empty() == !has_selection) || ids.len() > 1_000 {
+            return Err("provide either 1..=1000 explicit ids or one query selection".to_string());
+        }
+        if let Some(selection) = &command.selection {
+            let filter_values = selection.query.types.len() + selection.query.tag_ids.len()
+                + selection.query.collection_ids.len() + selection.excluded_ids.len();
+            if selection.excluded_ids.len() > 400 || filter_values > 900 {
+                return Err("query selection contains too many filter or excluded values".to_string());
+            }
+        }
+        let command = command.clone();
+        self.write(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            if let Some(summary) = tx.query_row(
+                "SELECT affected, revision FROM mutation_operations WHERE operation_id=?1",
+                [&command.operation_id],
+                |row| Ok(MutationSummary { affected: row.get::<_, i64>(0)? as usize, revision: row.get(1)? }),
+            ).optional().map_err(|error| error.to_string())? {
+                tx.commit().map_err(|error| error.to_string())?;
+                return Ok(summary);
+            }
+
+            tx.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS mutation_targets(id TEXT PRIMARY KEY) WITHOUT ROWID;
+                 DELETE FROM mutation_targets;",
+            ).map_err(|error| error.to_string())?;
+
+            if let Some(selection) = &command.selection {
+                let mut target_sql = String::from(
+                    "INSERT OR IGNORE INTO mutation_targets(id)
+                     SELECT a.id FROM assets a
+                     LEFT JOIN asset_user_state u ON u.asset_id=a.id
+                     WHERE a.deleted_at IS NULL",
+                );
+                let mut values = Vec::<rusqlite::types::Value>::new();
+                crate::asset_query::append_asset_filters(&selection.query, &mut target_sql, &mut values);
+                if !selection.excluded_ids.is_empty() {
+                    target_sql.push_str(" AND a.id NOT IN (");
+                    target_sql.push_str(&vec!["?"; selection.excluded_ids.len()].join(","));
+                    target_sql.push(')');
+                    values.extend(selection.excluded_ids.iter().cloned().map(rusqlite::types::Value::from));
+                }
+                tx.execute(&target_sql, rusqlite::params_from_iter(values.iter()))
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let mut target_statement = tx.prepare(
+                    "INSERT OR IGNORE INTO mutation_targets(id)
+                     SELECT id FROM assets WHERE id=?1 AND deleted_at IS NULL",
+                ).map_err(|error| error.to_string())?;
+                for id in &ids {
+                    target_statement.execute([id]).map_err(|error| error.to_string())?;
+                }
+            }
+
+            let affected: usize = tx.query_row("SELECT count(*) FROM mutation_targets", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            if command.selection.is_none() && affected != ids.len() {
+                return Err("mutation conflict: one or more assets no longer exist".to_string());
+            }
+            if let Some(expected) = command.expected_version {
+                let conflicts: usize = tx.query_row(
+                    "SELECT count(*) FROM assets a JOIN mutation_targets t ON t.id=a.id WHERE a.record_version<>?1",
+                    [expected], |row| row.get(0),
+                ).map_err(|error| error.to_string())?;
+                if conflicts > 0 {
+                    return Err("mutation conflict: stale asset version".to_string());
+                }
+            }
+
+            let now = chrono::Utc::now().timestamp_millis();
+            tx.execute(
+                "INSERT INTO asset_user_state(asset_id, rating, favorite, color, updated_at)
+                 SELECT t.id, COALESCE(?1, 0), COALESCE(?2, 0), ?3, ?4 FROM mutation_targets t WHERE true
+                 ON CONFLICT(asset_id) DO UPDATE SET
+                   rating=COALESCE(?1, asset_user_state.rating),
+                   favorite=COALESCE(?2, asset_user_state.favorite),
+                   color=COALESCE(?3, asset_user_state.color), updated_at=?4",
+                params![command.patch.rating.map(|value| value.min(5)), command.patch.favorite.map(i32::from), command.patch.color, now],
+            ).map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE assets SET record_version=record_version+1 WHERE id IN (SELECT id FROM mutation_targets)",
+                [],
+            ).map_err(|error| error.to_string())?;
+
+            let revision = revision_after_mutation(&tx, affected)?;
+            tx.execute(
+                "INSERT INTO mutation_operations(operation_id, affected, revision, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![command.operation_id, affected as i64, revision, now],
+            ).map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
             Ok(MutationSummary { affected, revision })
         })
     }
@@ -927,6 +1035,7 @@ impl Database {
     // =========================================================================
 
     /// 获取所有资产列表及附带标签/集合关联
+    #[cfg(test)]
     pub fn get_all_assets(&self) -> Result<Vec<Asset>, String> {
         let conn = self.conn.lock();
 
@@ -958,6 +1067,7 @@ impl Database {
     }
 
     /// 分批 JOIN 查询加载全部资产的标签（消除 N+1，并规避单条 IN 超变量上限）
+    #[cfg(test)]
     fn load_tags_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
         let mut map: AssocMap = HashMap::new();
         if asset_ids.is_empty() {
@@ -989,6 +1099,7 @@ impl Database {
     }
 
     /// 分批 JOIN 查询加载全部资产的集合（消除 N+1，并规避单条 IN 超变量上限）
+    #[cfg(test)]
     fn load_cols_for_assets(conn: &Connection, asset_ids: &[&str]) -> Result<AssocMap, String> {
         let mut map: AssocMap = HashMap::new();
         if asset_ids.is_empty() {
@@ -1026,6 +1137,7 @@ impl Database {
     /// 全文搜索资产（基于 SQLite FTS5 索引）
     /// query: 用户输入的搜索关键字（支持 FTS5 MATCH 语法）
     /// limit: 返回最大条数
+    #[cfg(test)]
     pub fn search_assets(&self, query: &str, limit: usize) -> Result<Vec<Asset>, String> {
         let query = query.trim();
         if query.is_empty() {
@@ -1081,17 +1193,6 @@ impl Database {
         ).map_err(|e| e.to_string())?;
         revision_after_mutation(&tx, affected)?;
         tx.commit().map_err(|e| e.to_string())
-    }
-
-    /// 更新资产评分与收藏状态
-    pub fn set_asset_rating(&self, id: &str, rating: u8) -> Result<(), String> {
-        self.patch_user_state(&AssetUserPatch::rating(id, rating)).map(|_| ())
-    }
-
-    pub fn set_asset_favorite(&self, id: &str, favorite: bool) -> Result<(), String> {
-        self.patch_user_state(&AssetUserPatch {
-            asset_id: id.to_string(), favorite: Some(favorite), ..AssetUserPatch::default()
-        }).map(|_| ())
     }
 
     /// 批量删除资产
@@ -1301,6 +1402,7 @@ impl Database {
         Ok(affected)
     }
 
+    #[cfg(test)]
     pub fn delete_assets_by_ids(&self, ids: &[String]) -> Result<usize, String> {
         self.complete_scan_removals(&[], ids).map(|(_, assets)| assets)
     }
@@ -1332,6 +1434,7 @@ impl Database {
     }
 
     /// Startup has no completed scan evidence: an absent/offline path is not a deletion.
+    #[cfg(test)]
     pub fn validate_assets(&self) -> Result<(usize, usize), String> {
         Ok((self.asset_count()?, 0))
     }
@@ -1393,6 +1496,7 @@ impl Database {
 
     /// 轻量读取某根目录下全部资产的签名 (id, path, date_modified, size)，
     /// 供对账与库内现状比对，避免携带 tags/collections 的额外开销。
+    #[cfg(test)]
     pub fn get_asset_signatures_under(&self, root_path: &str) -> Result<Vec<(String, String, String, i64)>, String> {
         let root = normalize_windows_path(root_path);
         let conn = self.conn.lock();
@@ -1633,6 +1737,7 @@ impl Database {
 
 /// 将用户输入的关键词转为 FTS5 安全搜索表达式
 /// 支持多词 AND 匹配：用户输入多个空格分隔的单词时，全部单词都必须出现
+#[cfg(test)]
 fn build_fts_query(user_input: &str) -> String {
     let words: Vec<&str> = user_input
         .split_whitespace()

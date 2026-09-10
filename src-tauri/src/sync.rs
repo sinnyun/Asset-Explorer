@@ -5,23 +5,24 @@
 //!       都能被精确感知并全量实时同步到数据库与前端 UI。
 //! ============================================================================
 
+#[cfg(test)]
 use crate::database::Database;
+#[cfg(test)]
 use crate::indexer::{infer_category_from_extension, stable_hash};
+#[cfg(test)]
 use crate::metadata_extractor;
-use crate::models::{Asset, Folder};
+#[cfg(test)]
+use crate::models::Asset;
+use crate::models::Folder;
+#[cfg(test)]
 use crate::watcher::AssetChangeEvent;
+#[cfg(test)]
 use chrono::Utc;
 use serde::Serialize;
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter};
-
-/// 对账模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconcileMode {
-    /// Explicit user-requested maintenance only.
-    Pruned,
-}
 
 /// 文件夹级事件载荷（新增/更新/删除），经事件通道推送给前端实时刷新目录树。
 #[derive(Clone, Serialize)]
@@ -31,6 +32,7 @@ pub struct FolderChangeEvent {
 }
 
 /// 一次对账的统计报告。
+#[cfg(test)]
 #[derive(Debug, Default, Serialize)]
 pub struct ReconcileReport {
     pub folders_added: usize,
@@ -42,6 +44,7 @@ pub struct ReconcileReport {
 }
 
 /// 是否应忽略的隐藏目录或常见构建缓存（与 indexer.rs 保持一致）。
+#[cfg(test)]
 pub fn should_ignore_dir(name: &str) -> bool {
     if name.starts_with('.') && name != "." && name != ".." {
         return true;
@@ -53,6 +56,7 @@ pub fn should_ignore_dir(name: &str) -> bool {
 }
 
 /// 读取路径的修改时间，转为 RFC3339 字符串。
+#[cfg(test)]
 pub fn mtime_of(path: &Path) -> Option<String> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).map(|t| {
         let dt: chrono::DateTime<Utc> = t.into();
@@ -62,6 +66,7 @@ pub fn mtime_of(path: &Path) -> Option<String> {
 
 /// 将文件系统路径规整为键（全部正斜杠转为反斜杠，去首尾空格与尾部分隔符，转小写），
 /// 确保跨平台/Windows下哈希表查找绝对一致，杜绝斜杠/大小写导致的失配。
+#[cfg(test)]
 pub fn norm_key(p: &str) -> String {
     crate::database::normalize_windows_path(p)
 }
@@ -82,11 +87,13 @@ mod tests {
 }
 
 /// 格式化根路径（去首尾空白与末尾分隔符）。
+#[cfg(test)]
 pub fn normalize_root(p: &str) -> String {
     norm_key(p)
 }
 
 /// 判断路径是否位于根目录（含根本身）之下，兼容分隔符与大小写。
+#[cfg(test)]
 pub fn is_path_under(path: &str, root: &str) -> bool {
     let p = norm_key(path);
     let r = norm_key(root);
@@ -97,12 +104,14 @@ pub fn is_path_under(path: &str, root: &str) -> bool {
 }
 
 /// 计算目录的确定性文件夹 id（与 indexer.rs 的 `f_`+stable_hash 口径一致）。
+#[cfg(test)]
 pub fn folder_id_for(path: &str) -> String {
     format!("f_{}", stable_hash(path))
 }
 
 /// 递归走查磁盘目录树，收集目录(含 mtime)与文件(含 mtime, size, PathBuf)。
 /// 仅提取文件系统属性（毫秒级），不解码图片或读大文件内容，保证快速且不阻塞。
+#[cfg(test)]
 fn walk_disk(
     dir: &Path,
     disk_dirs: &mut HashMap<String, (String, PathBuf)>,
@@ -117,6 +126,7 @@ fn walk_disk(
     Ok(())
 }
 
+#[cfg(test)]
 fn walk_disk_entries(
     dir: &Path,
     disk_dirs: &mut HashMap<String, (String, PathBuf)>,
@@ -147,6 +157,7 @@ fn walk_disk_entries(
 }
 
 /// 从磁盘文件构造资产对象（复用 indexer 的元数据提取口径）。
+#[cfg(test)]
 fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, root_norm: &str) -> Result<Asset, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| format!("读取对账文件 {} 失败: {e}", path.display()))?;
@@ -208,6 +219,7 @@ fn build_asset_from_disk(path: &Path, folder_id_map: &HashMap<String, String>, r
 }
 
 /// 计算某个文件所属父目录（本身已是其父时）的确定性 id；若文件直接位于根下则用根 id。
+#[cfg(test)]
 fn folder_id_for_root(file_path: &str, root_norm: &str) -> String {
     let parent = Path::new(file_path)
         .parent()
@@ -220,19 +232,8 @@ fn folder_id_for_root(file_path: &str, root_norm: &str) -> String {
     }
 }
 
-/// 对单个监控根文件夹执行"磁盘为真相"的完整对账，产出并推送增量事件。
-pub fn reconcile_root(
-    app: &AppHandle,
-    db: &Database,
-    root_path: &Path,
-    _mode: ReconcileMode,
-) -> Result<ReconcileReport, String> {
-    reconcile_with_events(db, root_path, &|name, payload| {
-        let _ = app.emit(name, payload);
-    })
-}
-
 /// Keep filesystem/database reconciliation testable without constructing a desktop window.
+#[cfg(test)]
 pub(crate) fn reconcile_with_events(
     db: &Database,
     root_path: &Path,

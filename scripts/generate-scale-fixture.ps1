@@ -41,6 +41,15 @@ for ($fileIndex = 0; $fileIndex -lt $FileCount; $fileIndex++) {
 if ($SparseLargeFileBytes -gt 0) {
     $largePath = Join-Path $target 'sparse-large-file.bin'
     $stream = [System.IO.File]::Open($largePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $stream.Dispose()
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+        & fsutil.exe sparse setflag $largePath | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Remove-Item -LiteralPath $largePath
+            throw "Unable to mark the large fixture as sparse; refusing to allocate real disk space."
+        }
+    }
+    $stream = [System.IO.File]::Open($largePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
     try { $stream.SetLength($SparseLargeFileBytes) } finally { $stream.Dispose() }
 }
 

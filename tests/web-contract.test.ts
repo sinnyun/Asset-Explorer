@@ -23,6 +23,9 @@ test('web server mounts bounded v2 endpoints and favorite is persisted', () => {
   assert.match(server, /v2Router/);
   assert.match(router, /\/v2\/assets\/query/);
   assert.match(router, /normalizeV2PageLimit/);
-  assert.match(provider, /assets\/\$\{id\}\/favorite/);
+  assert.match(router, /\/v2\/assets\/mutate/);
+  assert.match(router, /mutation conflict/);
+  assert.match(provider, /\/api\/v2\/assets\/mutate/);
+  assert.match(provider, /operationId: crypto\.randomUUID\(\)/);
   assert.doesNotMatch(provider, /schema 暂无收藏字段/);
 });

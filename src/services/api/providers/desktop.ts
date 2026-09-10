@@ -11,33 +11,10 @@
 
 import type {
   Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats, WorkspaceShell, AssetQuery, AssetPage,
-  FolderQuery, FolderPage, AssetDetail,
+  StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail, AssetMutation, MutationSummary,
 } from '../../../types';
-import type { ApiProvider, ScanResult } from '../types';
-import { normalizeFolders, normalizeAssets } from '../utils';
-
-// ============================================================================
-// Rust IPC 类型定义
-// ============================================================================
-
-/** Rust 后端返回的工作区载荷 */
-interface RustWorkspacePayload {
-  folders: any[];
-  tags: any[];
-  collections: any[];
-  smart_folders: any[];
-  assets: any[];
-}
-
-/** Rust 后端返回的扫描结果 */
-interface RustScanPayload {
-  root_folder: any;
-  sub_folders: any[];
-  assets: any[];
-  total_files_scanned: number;
-  total_duration_ms: number;
-}
+import type { ApiProvider } from '../types';
 
 // ============================================================================
 // Rust IPC 工具函数
@@ -101,61 +78,13 @@ class DesktopApiProvider implements ApiProvider {
     return callRustV2<AssetDetail[]>('get_asset_details_v2', { ids });
   }
 
+  mutateAssets(mutation: AssetMutation): Promise<MutationSummary> {
+    return callRustV2<MutationSummary>('mutate_assets_v2', { mutation });
+  }
+
   // ------------------------------------------------------------------------
   // 数据加载与扫描
   // ------------------------------------------------------------------------
-
-  /** 加载完整工作区数据（Rust SQLite） */
-  async loadWorkspace(): Promise<Partial<AssetState>> {
-    // 尝试加载，最多重试 2 次（解决 Vite HMR 初始化期间 IPC 可能失败的问题）
-    let payload: RustWorkspacePayload | null = null;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      payload = await callRust<RustWorkspacePayload>('load_workspace');
-      if (payload !== null) break;
-      if (attempt < 2) {
-        console.warn(`[DesktopApi] Rust IPC 返回空（第 ${attempt} 次），等待 500ms 后重试...`);
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-
-    if (payload === null) {
-      // IPC 暂时不可用不是“空工作区”，让上层进入重试.
-      throw new Error('[DesktopApi] 无法加载工作区：Rust IPC 不可用');
-    }
-
-    // 标准化：确保 parentId 为 null 时转 undefined、tags/collections 不为 undefined
-    const folders = normalizeFolders(payload.folders);
-    const assets = normalizeAssets(payload.assets);
-
-    // 标准化 SmartFolder：rules/matchAll 字段
-    const customSmartFolders = (payload.smart_folders || []).map((sf: any) => ({
-      ...sf,
-      rules: sf.rules ?? [],
-      matchAll: sf.matchAll ?? true,
-    }));
-
-    return {
-      folders,
-      tags: payload.tags || [],
-      collections: payload.collections || [],
-      customSmartFolders,
-      assets,
-    };
-  }
-
-  /** 扫描本地目录（Rust walkdir 索引） */
-  async scanDirectory(path: string): Promise<ScanResult | null> {
-    const raw = await callRust<RustScanPayload>('scan_directory', { path });
-    if (!raw) return null;
-
-    return {
-      root_folder: normalizeFolders([raw.root_folder])[0],
-      sub_folders: normalizeFolders(raw.sub_folders),
-      assets: normalizeAssets(raw.assets),
-      total_files_scanned: raw.total_files_scanned,
-      total_duration_ms: raw.total_duration_ms,
-    };
-  }
 
   /** 后台增量扫描本地目录（scan:started / scan:chunk / scan:finished / scan:failed 事件流） */
   async startScanDirectory(path: string): Promise<string | null> {
@@ -235,29 +164,16 @@ class DesktopApiProvider implements ApiProvider {
     return null;
   }
 
-  /** 校验资产有效性 */
-  async validateAssets(): Promise<void> {
-    const result = await callRust<{ deleted_count: number; total_checked: number }>('validate_assets');
-    if (result && result.deleted_count > 0) {
-      console.log(`[DesktopApi] 资产有效性校验: 检查 ${result.total_checked} 个, 清理 ${result.deleted_count} 个无效路径`);
-    }
-  }
-
-  /** 对全部监视文件夹执行一次完整的磁盘对账同步 */
-  async reconcileMonitoredFolders(): Promise<any> {
-    return await callRust('reconcile_monitored_folders');
-  }
-
   // ------------------------------------------------------------------------
   // 资产操作
   // ------------------------------------------------------------------------
 
   async setAssetRating(id: string, rating: number): Promise<void> {
-    await callRust<void>('set_asset_rating', { id, rating });
+    await this.mutateAssets({ operationId: crypto.randomUUID(), ids: [id], patch: { rating } });
   }
 
   async setAssetFavorite(id: string, favorite: boolean): Promise<void> {
-    await callRust<void>('set_asset_favorite', { id, favorite });
+    await this.mutateAssets({ operationId: crypto.randomUUID(), ids: [id], patch: { favorite } });
   }
 
   async deleteAssets(ids: string[]): Promise<void> {

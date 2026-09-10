@@ -12,15 +12,15 @@
  * ============================================================================
  */
 
-import type { ApiProvider, ScanResult } from './types';
+import type { ApiProvider } from './types';
 import type {
   Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats, WorkspaceShell, AssetQuery, AssetPage,
-  FolderQuery, FolderPage, AssetDetail,
+  StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail, AssetMutation, MutationSummary,
 } from '../../types';
 
 // Re-export types for external use
-export type { ApiProvider, ScanResult } from './types';
+export type { ApiProvider } from './types';
 export { isTauriDesktop } from './providers/desktop';
 
 // ============================================================================
@@ -96,9 +96,6 @@ export const apiClient: ApiProvider = {
   get envLabel() { return getProvider().envLabel; },
 
   // ---- 数据加载 ----
-  loadWorkspace(): Promise<Partial<AssetState>> {
-    return getProvider().loadWorkspace();
-  },
   getWorkspaceShell(): Promise<WorkspaceShell> {
     return getProvider().getWorkspaceShell();
   },
@@ -111,17 +108,14 @@ export const apiClient: ApiProvider = {
   getAssetDetails(ids: string[]): Promise<AssetDetail[]> {
     return getProvider().getAssetDetails(ids);
   },
-  scanDirectory(path: string): Promise<ScanResult | null> {
-    return getProvider().scanDirectory(path);
+  mutateAssets(mutation: AssetMutation): Promise<MutationSummary> {
+    return getProvider().mutateAssets(mutation);
   },
   startScanDirectory(path: string): Promise<string | null> {
     return getProvider().startScanDirectory(path);
   },
   getAssetThumbnail(assetId: string, path: string, existingThumbnailUrl?: string): Promise<string | null> {
     return getProvider().getAssetThumbnail(assetId, path, existingThumbnailUrl);
-  },
-  validateAssets(): Promise<void> {
-    return getProvider().validateAssets();
   },
 
   // ---- 资产操作 ----

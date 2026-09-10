@@ -12,18 +12,9 @@
 
 import type {
   Asset, Folder, Tag, Collection, SmartFolder,
-  AssetState, StorageStats, WorkspaceShell, AssetQuery, AssetPage,
-  FolderQuery, FolderPage, AssetDetail,
+  StorageStats, WorkspaceShell, AssetQuery, AssetPage,
+  FolderQuery, FolderPage, AssetDetail, AssetMutation, MutationSummary,
 } from '../../types';
-
-/** 工作区扫描结果 */
-export interface ScanResult {
-  root_folder: Folder;
-  sub_folders: Folder[];
-  assets: Asset[];
-  total_files_scanned: number;
-  total_duration_ms: number;
-}
 
 /**
  * ============================================================================
@@ -49,9 +40,6 @@ export interface ApiProvider {
   // ------------------------------------------------------------------------
   // 数据加载与扫描
   // ------------------------------------------------------------------------
-  /** 加载完整工作区数据（资产、文件夹、标签、集合、智能文件夹） */
-  loadWorkspace(): Promise<Partial<AssetState>>;
-
   getWorkspaceShell(): Promise<WorkspaceShell>;
 
   queryAssets(query: AssetQuery): Promise<AssetPage>;
@@ -60,8 +48,7 @@ export interface ApiProvider {
 
   getAssetDetails(ids: string[]): Promise<AssetDetail[]>;
 
-  /** 扫描本地目录并返回结果 */
-  scanDirectory(path: string): Promise<ScanResult | null>;
+  mutateAssets(mutation: AssetMutation): Promise<MutationSummary>;
 
   /** 后台增量扫描本地目录（通过事件流推送进度与增量资产），命令立即返回 */
   startScanDirectory(path: string): Promise<string | null>;
@@ -71,12 +58,6 @@ export interface ApiProvider {
 
   /** 初始化示例工作区数据（Web端登录云端提供一键导入） */
   seedWorkspace?(): Promise<boolean>;
-
-  /** 校验资产有效性（删除数据库中文件已不存在的记录） */
-  validateAssets(): Promise<void>;
-
-  /** 对全部监视文件夹执行一次完整的磁盘对账同步 */
-  reconcileMonitoredFolders?(): Promise<any>;
 
   // ------------------------------------------------------------------------
   // 资产操作

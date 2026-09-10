@@ -5,33 +5,22 @@
 //! 绝不堵塞前端 UI 界面！
 //! ============================================================================
 
-use crate::aggregator::{aggregate_asset_metrics, filter_assets_by_smart_folder};
 use crate::database::Database;
 use crate::index_jobs::{IndexCoordinator, JobSnapshot};
-use crate::indexer::{scan_local_directory, scan_local_directory_streaming, ScanBatch};
+use crate::indexer::{scan_local_directory_streaming, ScanBatch};
 use crate::metadata_extractor::extract_metadata;
 use crate::models::{
-    AggregationReport, Asset, AssetDetail, AssetPage, AssetQuery, Collection, Folder,
-    FolderPage, FolderQuery, ScanResult, SmartFolder, Tag, WorkspaceShell,
+    AssetDetail, AssetMutation, AssetPage, AssetQuery, Collection, Folder, FolderPage,
+    FolderQuery, MutationSummary, SmartFolder, Tag, WorkspaceShell,
 };
 use crate::metrics::DiagnosticsSnapshot;
+use crate::preview_stream::{read_asset_range, AssetRange};
 use crate::thumbnail_cache::generate_or_get_thumbnail;
 use crate::thumbnail_jobs::ThumbnailCoordinator;
 use crate::sync::FolderChangeEvent;
 use crate::watcher::{backfill_existing_assets, WatcherRegistry};
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::{Emitter, State};
-
-/// 前端初始化全量工作区状态
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WorkspacePayload {
-    pub folders: Vec<Folder>,
-    pub tags: Vec<Tag>,
-    pub collections: Vec<Collection>,
-    pub smart_folders: Vec<SmartFolder>,
-    pub assets: Vec<Asset>,
-}
 
 #[tauri::command]
 pub async fn get_workspace_shell_v2(db: State<'_, Database>) -> Result<WorkspaceShell, String> {
@@ -85,56 +74,16 @@ pub async fn get_asset_details_v2(
         .map_err(|e| format!("V2 资产详情任务失败: {e}"))?
 }
 
-/// 指令 1: 异步加载本地 SQLite 数据库中的全量工作区数据。
-/// 启动加载只读缓存；磁盘对账由后台监控任务负责，避免阻塞首屏。
 #[tauri::command]
-pub async fn load_workspace(
-    app_handle: tauri::AppHandle,
+pub async fn mutate_assets_v2(
     db: State<'_, Database>,
-) -> Result<WorkspacePayload, String> {
+    mutation: AssetMutation,
+) -> Result<MutationSummary, String> {
     let db = db.inner().clone();
-    let _ = app_handle;
-    tokio::task::spawn_blocking(move || {
-        let folders = db.get_folders()?;
-        let tags = db.get_tags()?;
-        let collections = db.get_collections()?;
-        let smart_folders = db.get_smart_folders()?;
-        let assets = db.get_all_assets()?;
-
-        Ok(WorkspacePayload {
-            folders,
-            tags,
-            collections,
-            smart_folders,
-            assets,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || db.mutate_assets(&mutation))
+        .await
+        .map_err(|error| format!("V2 资产修改任务失败: {error}"))?
 }
-
-/// 指令 2: 异步扫描本地目录并写入持久化数据库
-#[tauri::command]
-pub async fn scan_directory(
-    db: State<'_, Database>,
-    registry: State<'_, WatcherRegistry>,
-    path: String,
-) -> Result<ScanResult, String> {
-    let db = db.inner().clone();
-
-    // 将路径注册到文件监控器
-    let _ = registry.add_folder(&path);
-
-    tokio::task::spawn_blocking(move || {
-        let scan_res = scan_local_directory(&path)?;
-        // 自动将扫描到的所有文件夹与资产写入 SQLite 数据库持久化
-        db.batch_save_scan_results(&scan_res.root_folder, &scan_res.sub_folders, &scan_res.assets)?;
-        Ok(scan_res)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 
 /// 指令 2d: 动态注册文件夹到文件监控器（运行时添加监视文件夹时调用）
 #[tauri::command]
@@ -179,6 +128,33 @@ pub async fn start_scan_directory(
         eprintln!("[Watcher] start_scan_directory 注册监控失败: {}", e);
     }
 
+    start_scan_job(db, coordinator.inner().clone(), app_handle, path)
+}
+
+/// Explicit, cancellable full-root recovery. This is never scheduled at startup.
+#[tauri::command]
+pub async fn start_integrity_job_v2(
+    db: State<'_, Database>,
+    coordinator: State<'_, IndexCoordinator>,
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    let db = db.inner().clone();
+    let normalized = crate::database::normalize_windows_path(&path);
+    let authorized = db.get_monitored_folders()?.into_iter()
+        .any(|root| crate::database::normalize_windows_path(&root.path) == normalized);
+    if !authorized {
+        return Err("完整性检查仅允许针对已监控的根目录".to_string());
+    }
+    start_scan_job(db, coordinator.inner().clone(), app_handle, path)
+}
+
+fn start_scan_job(
+    db: Database,
+    coordinator: IndexCoordinator,
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
     let root_id = format!("f_root_{}", crate::indexer::stable_hash(&path));
     coordinator.start(root_id, move |cancelled| {
         let emit_handle = app_handle.clone();
@@ -242,6 +218,26 @@ pub async fn start_scan_directory(
     })
 }
 
+/// Bounded random access for text/header inspectors. Media previews use Tauri's
+/// streaming asset protocol and do not copy complete source files into JS.
+#[tauri::command]
+pub async fn read_asset_range_v2(
+    db: State<'_, Database>,
+    path: String,
+    offset: u64,
+    length: usize,
+) -> Result<AssetRange, String> {
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let roots = db.get_monitored_folders()?.into_iter()
+            .map(|folder| std::path::PathBuf::from(folder.path))
+            .collect::<Vec<_>>();
+        read_asset_range(Path::new(&path), &roots, offset, length)
+    })
+    .await
+    .map_err(|error| format!("文件区间读取任务失败: {error}"))?
+}
+
 #[tauri::command]
 pub fn cancel_job_v2(
     coordinator: State<'_, IndexCoordinator>,
@@ -270,34 +266,6 @@ pub fn get_diagnostics_v2(
         thumbnails.queued(),
         db.asset_count()?,
     ))
-}
-
-/// 指令 2b: 全文搜索资产（SQLite FTS5）
-#[tauri::command]
-pub async fn search_assets(db: State<'_, Database>, query: String, limit: Option<usize>) -> Result<Vec<Asset>, String> {
-    let db = db.inner().clone();
-    let limit = limit.unwrap_or(100);
-    tokio::task::spawn_blocking(move || db.search_assets(&query, limit))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-/// 指令 3: 后端数据库更新资产评分
-#[tauri::command]
-pub async fn set_asset_rating(db: State<'_, Database>, id: String, rating: u8) -> Result<(), String> {
-    let db = db.inner().clone();
-    tokio::task::spawn_blocking(move || db.set_asset_rating(&id, rating))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-/// 指令 4: 后端数据库更新资产收藏状态
-#[tauri::command]
-pub async fn set_asset_favorite(db: State<'_, Database>, id: String, favorite: bool) -> Result<(), String> {
-    let db = db.inner().clone();
-    tokio::task::spawn_blocking(move || db.set_asset_favorite(&id, favorite))
-        .await
-        .map_err(|e| e.to_string())?
 }
 
 /// 指令 5: 后端数据库批量删除资产
@@ -578,22 +546,6 @@ pub async fn delete_smart_folder(db: State<'_, Database>, id: String) -> Result<
         .map_err(|e| e.to_string())?
 }
 
-/// 指令 15: 多维数据聚合计算 (Rayon 多核并发，异步非阻塞)
-#[tauri::command]
-pub async fn aggregate_data(assets: Vec<Asset>) -> Result<AggregationReport, String> {
-    tokio::task::spawn_blocking(move || aggregate_asset_metrics(&assets))
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// 指令 16: 智能文件夹规则多核过滤
-#[tauri::command]
-pub async fn filter_by_smart_folder(assets: Vec<Asset>, smart_folder: SmartFolder) -> Result<Vec<String>, String> {
-    tokio::task::spawn_blocking(move || filter_assets_by_smart_folder(&assets, &smart_folder))
-        .await
-        .map_err(|e| e.to_string())
-}
-
 /// 指令 17: 提取文件元数据（仅文件头级：MIME 与图片尺寸，不读文件内容）
 #[tauri::command]
 pub async fn get_file_metadata(path: String) -> Result<serde_json::Value, String> {
@@ -696,27 +648,6 @@ pub fn restart_application(app_handle: tauri::AppHandle) {
     app_handle.restart();
 }
 
-/// 指令 24: 启动时校验资产有效性（删除数据库中文件已不存在的资产记录）
-#[derive(Serialize)]
-pub struct ValidationResult {
-    pub deleted_count: usize,
-    pub total_checked: usize,
-}
-
-#[tauri::command]
-pub async fn validate_assets(db: State<'_, Database>) -> Result<ValidationResult, String> {
-    let db = db.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        let (total, deleted) = db.validate_assets()?;
-        Ok(ValidationResult {
-            deleted_count: deleted,
-            total_checked: total,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// 指令 25: 读取缩略图文件并以 base64 data URL 返回（绕过浏览器 file:// 安全限制）
 /// 使用 mime_guess 开源库替代手写 MIME 推断
 #[tauri::command]
@@ -748,40 +679,4 @@ pub async fn read_thumbnail_base64(file_path: String) -> Result<String, String> 
 #[tauri::command]
 pub fn file_exists(file_path: String) -> bool {
     std::path::Path::new(&file_path).exists()
-}
-
-/// 指令 28: 对全部已监控根文件夹执行一次廉价剪枝对账
-/// 以磁盘为真相源，用目录/文件 mtime 做增量，纠正 notify 事件漏检；
-/// 幂等，可安全重复调用。返回聚合后的对账报告供前端/日志查看。
-#[tauri::command]
-pub async fn reconcile_monitored_folders(
-    db: State<'_, Database>,
-    app_handle: tauri::AppHandle,
-) -> Result<crate::sync::ReconcileReport, String> {
-    let db = db.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        use crate::sync::{reconcile_root, ReconcileMode};
-        let folders = db.get_monitored_folders()?;
-        let mut total = crate::sync::ReconcileReport::default();
-        for f in &folders {
-            let p = Path::new(&f.path);
-            if !p.exists() || !p.is_dir() {
-                continue;
-            }
-            match reconcile_root(&app_handle, &db, p, ReconcileMode::Pruned) {
-                Ok(r) => {
-                    total.folders_added += r.folders_added;
-                    total.folders_removed += r.folders_removed;
-                    total.folders_updated += r.folders_updated;
-                    total.assets_added += r.assets_added;
-                    total.assets_removed += r.assets_removed;
-                    total.assets_updated += r.assets_updated;
-                }
-                Err(e) => eprintln!("[Cmd] reconcile_monitored_folders 对账失败 {}: {}", f.path, e),
-            }
-        }
-        Ok(total)
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
