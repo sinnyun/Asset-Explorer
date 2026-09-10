@@ -124,45 +124,6 @@ export default function App() {
     [state.folders, state.activeFolderId, filteredFolders, folderCardDepth],
   );
 
-  // 中间卡片按需预加载选中的层级；只读取文件夹摘要，不触碰资产内容。
-  // 左侧树仍由用户展开时单独懒加载，二者互不共享展开状态。
-  const folderTreeRootKey = React.useMemo(
-    () => state.folders.filter(folder => !folder.parentId).map(folder => folder.id).sort().join('|'),
-    [state.folders],
-  );
-
-  React.useEffect(() => {
-    if (folderCardDepth === Infinity) return;
-    const requestedDepth = Math.max(1, Math.min(8, folderCardDepth));
-    const contextId = state.activeFolderId;
-    const initialFrontier = contextId
-      ? [contextId]
-      : state.folders.filter(folder => !folder.parentId).map(folder => folder.id);
-    if (initialFrontier.length === 0) return;
-
-    let disposed = false;
-    const loadLevels = async () => {
-      let frontier = initialFrontier;
-      const discovered: import('./types').Folder[] = [];
-      const discoveredSummaries: import('./types').FolderSummary[] = [];
-      const levelsToLoad = contextId ? requestedDepth : Math.max(0, requestedDepth - 1);
-      for (let level = 0; level < levelsToLoad && frontier.length > 0; level += 1) {
-        const pages = await Promise.all(frontier.map(folderId =>
-          dataService.queryFolders({ parentId: folderId, limit: 300 }),
-        ));
-        const next = pages.flatMap(page => page.items.map(folderSummaryToFolder));
-        discovered.push(...next);
-        discoveredSummaries.push(...pages.flatMap(page => page.items));
-        frontier = next.map(folder => folder.id);
-      }
-      if (!disposed && discovered.length > 0) {
-        setState(previous => ({ ...previous, folders: mergeFolderSummaries(previous.folders, discoveredSummaries) }));
-      }
-    };
-    void loadLevels().catch(error => console.warn('[App] 中间文件夹层级加载失败:', error));
-    return () => { disposed = true; };
-  }, [folderCardDepth, state.activeFolderId, folderTreeRootKey]);
-
   // Legacy action panels temporarily consume only the bounded active query page,
   // never the complete database table.
   React.useEffect(() => {
